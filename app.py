@@ -6,9 +6,10 @@ import google.generativeai as genai
 from datetime import datetime
 from flask import Flask, request, jsonify
 from collections import defaultdict
-
+from dotenv import load_dotenv
 app = Flask(__name__)
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+load_dotenv()
+GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable is required")
 
