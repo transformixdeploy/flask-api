@@ -373,18 +373,50 @@ class SmartRAGAssistant:
         
         for col in numeric_cols:
             if not self.df[col].isna().all():
-                summary[col] = {
-                    "count": int(self.df[col].count()),
-                    "mean": float(self.df[col].mean()),
-                    "median": float(self.df[col].median()),
-                    "std": float(self.df[col].std()),
-                    "min": float(self.df[col].min()),
-                    "max": float(self.df[col].max()),
-                    "q25": float(self.df[col].quantile(0.25)),
-                    "q75": float(self.df[col].quantile(0.75)),
-                    "sum": float(self.df[col].sum()),
-                    "unique_count": int(self.df[col].nunique())
-                }
+                try:
+                    count_val = int(self.df[col].count())
+                    mean_val = float(self.df[col].mean())
+                    median_val = float(self.df[col].median())
+                    std_val = float(self.df[col].std())
+                    min_val = float(self.df[col].min())
+                    max_val = float(self.df[col].max())
+                    q25_val = float(self.df[col].quantile(0.25))
+                    q75_val = float(self.df[col].quantile(0.75))
+                    sum_val = float(self.df[col].sum())
+                    unique_count = int(self.df[col].nunique())
+                    
+                    if pd.isna(mean_val):
+                        mean_val = 0.0
+                    if pd.isna(median_val):
+                        median_val = 0.0
+                    if pd.isna(std_val):
+                        std_val = 0.0
+                    if pd.isna(min_val):
+                        min_val = 0.0
+                    if pd.isna(max_val):
+                        max_val = 0.0
+                    if pd.isna(q25_val):
+                        q25_val = 0.0
+                    if pd.isna(q75_val):
+                        q75_val = 0.0
+                    if pd.isna(sum_val):
+                        sum_val = 0.0
+                    
+                    summary[col] = {
+                        "count": count_val,
+                        "mean": mean_val,
+                        "median": median_val,
+                        "std": std_val,
+                        "min": min_val,
+                        "max": max_val,
+                        "q25": q25_val,
+                        "q75": q75_val,
+                        "sum": sum_val,
+                        "unique_count": unique_count
+                    }
+                except Exception as e:
+                    print(f"Skipping column {col} due to error: {e}")
+                    continue
         
         return summary
     
@@ -566,16 +598,23 @@ def format_response_structure(rag_result):
     relevant_statistics = []
     if isinstance(rag_result.get('relevant_statistics'), dict):
         for key, value in rag_result['relevant_statistics'].items():
+            # Convert value to number, skip if not possible
+            numeric_value = None
+            
             if isinstance(value, (int, float)):
-                relevant_statistics.append({
-                    "key": key.replace('_', ' ').title(),
-                    "value": value
-                })
+                numeric_value = value
+            elif isinstance(value, str):
+                try:
+                    numeric_value = float(value)
+                except (ValueError, TypeError):
+                    continue
             else:
-                # Handle non-numeric statistics
+                continue
+            
+            if numeric_value is not None:
                 relevant_statistics.append({
                     "key": key.replace('_', ' ').title(),
-                    "value": str(value)
+                    "value": numeric_value
                 })
     
     actionable_insights = []
@@ -694,7 +733,7 @@ def upload():
             "message": f"Unexpected error: {str(e)}"
         }), 500
 
-@app.route('/ai/smart-question-example', methods=['POST'])
+@app.route('/ai/smart-question-examples', methods=['POST'])
 def smart_question_example():
     try:
         if 'data' not in request.files:
