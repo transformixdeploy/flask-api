@@ -476,705 +476,106 @@ class UniversalMarketBasketAnalyzer:
         self.df = df
         self.schema_analysis = schema_analysis
         self.transaction_fields = schema_analysis.get('transaction_fields', [])
-        self.transactions = self.prepare_enhanced_transactions()
+        self.transactions = self.prepare_universal_transactions()
     
-    def prepare_enhanced_transactions(self):
-        """Enhanced transaction preparation with multiple detection strategies"""
+    def prepare_universal_transactions(self):
+        """Prepare transactions from any dataset structure"""
         transactions = []
         
-        # Strategy 1: Explicit transaction fields (existing approach)
+        # If specific transaction fields are identified
         if self.transaction_fields:
             for field in self.transaction_fields:
                 if field in self.df.columns:
-                    transactions.extend(self._extract_transactions_from_field(field))
-        
-        # Strategy 2: Auto-detect comma/delimiter separated fields
-        transactions.extend(self._detect_separated_value_fields())
-        
-        # Strategy 3: Binary/Boolean columns as transactions
-        transactions.extend(self._detect_binary_transactions())
-        
-        # Strategy 4: Category combinations across rows
-        transactions.extend(self._detect_categorical_combinations())
-        
-        # Strategy 5: Numerical range-based transactions
-        transactions.extend(self._detect_numerical_range_transactions())
-        
-        # Remove duplicates and empty transactions
-        unique_transactions = []
-        seen = set()
-        for trans in transactions:
-            if len(trans) > 1:  # Only keep transactions with multiple items
-                trans_tuple = tuple(sorted(trans))
-                if trans_tuple not in seen:
-                    unique_transactions.append(trans)
-                    seen.add(trans_tuple)
-        
-        return unique_transactions
-    
-    def _extract_transactions_from_field(self, field_name, separators=None):
-        """Extract transactions from a single field with multiple separators"""
-        if separators is None:
-            separators = [',', ';', '|', '/', '&', '+', '-', ' and ', ' & ']
-        
-        transactions = []
-        for idx, row in self.df.iterrows():
-            if pd.notna(row[field_name]):
-                value_str = str(row[field_name]).strip()
-                
-                # Try different separators
-                for sep in separators:
-                    if sep in value_str:
-                        items = [item.strip().lower() for item in value_str.split(sep)]
-                        items = [item for item in items if item and len(item) > 0]
-                        if len(items) > 1:
-                            transactions.append(items)
-                        break
+                    for idx, row in self.df.iterrows():
+                        if pd.notna(row[field]):
+                            # Split comma-separated values
+                            items = [item.strip() for item in str(row[field]).split(',')]
+                            items = [item for item in items if item and item != '']
+                            if len(items) > 1:
+                                transactions.append(items)
+        else:
+            # Try to detect transactional patterns automatically
+            text_cols = self.df.select_dtypes(include=['object', 'string']).columns
+            
+            for col in text_cols:
+                # Look for comma-separated values
+                has_commas = self.df[col].astype(str).str.contains(',', na=False).sum()
+                if has_commas > len(self.df) * 0.1:  # If >10% have commas
+                    for idx, row in self.df.iterrows():
+                        if pd.notna(row[col]) and ',' in str(row[col]):
+                            items = [item.strip() for item in str(row[col]).split(',')]
+                            items = [item for item in items if item and item != '']
+                            if len(items) > 1:
+                                transactions.append(items)
+                    break  # Use first suitable column
         
         return transactions
     
-    def _detect_separated_value_fields(self):
-        """Auto-detect fields with separated values"""
-        transactions = []
-        text_cols = self.df.select_dtypes(include=['object', 'string']).columns
-        
-        separators = [',', ';', '|', '/', '&', '+', '-']
-        
-        for col in text_cols:
-            # Skip if already processed
-            if col in self.transaction_fields:
-                continue
-                
-            separator_scores = {}
-            sample_size = min(100, len(self.df))
-            sample_data = self.df[col].dropna().head(sample_size)
-            
-            for sep in separators:
-                score = 0
-                for value in sample_data:
-                    if pd.notna(value) and sep in str(value):
-                        parts = str(value).split(sep)
-                        if len(parts) > 1 and all(len(p.strip()) > 0 for p in parts):
-                            score += len(parts)
-                
-                if score > 0:
-                    separator_scores[sep] = score
-            
-            # If we found a good separator, extract transactions
-            if separator_scores:
-                best_sep = max(separator_scores, key=separator_scores.get)
-                # Only use if at least 10% of non-null values have the separator
-                threshold = max(1, len(sample_data) * 0.1)
-                if separator_scores[best_sep] > threshold:
-                    field_transactions = self._extract_transactions_from_field(col, [best_sep])
-                    transactions.extend(field_transactions)
-        
-        return transactions
-    
-    def _detect_binary_transactions(self):
-        """Detect transactions from binary/boolean columns"""
-        transactions = []
-        
-        # Find binary columns (0/1, True/False, Yes/No, etc.)
-        binary_cols = []
-        for col in self.df.columns:
-            unique_vals = self.df[col].dropna().unique()
-            if len(unique_vals) == 2:
-                binary_cols.append(col)
-        
-        if len(binary_cols) < 2:
-            return transactions
-        
-        # Create transactions for each row where multiple binary columns are "true"
-        for idx, row in self.df.iterrows():
-            true_items = []
-            for col in binary_cols:
-                if pd.notna(row[col]):
-                    val = str(row[col]).lower()
-                    if val in ['1', '1.0', 'true', 'yes', 'y', 'on', 'active']:
-                        true_items.append(f"{col.lower()}")
-            
-            if len(true_items) > 1:
-                transactions.append(true_items)
-        
-        return transactions
-    
-    def _detect_categorical_combinations(self):
-        """Create transactions from categorical column combinations"""
-        transactions = []
-        
-        # Find categorical columns with reasonable cardinality
-        categorical_cols = []
-        for col in self.df.select_dtypes(include=['object', 'string']).columns:
-            unique_count = self.df[col].nunique()
-            if 2 <= unique_count <= 20:  # Reasonable range for categories
-                categorical_cols.append(col)
-        
-        if len(categorical_cols) < 2:
-            return transactions
-        
-        # Create transactions from combinations of categorical values
-        for idx, row in self.df.iterrows():
-            items = []
-            for col in categorical_cols:
-                if pd.notna(row[col]):
-                    val = str(row[col]).strip().lower()
-                    if val and len(val) > 0:
-                        items.append(f"{col}_{val}")
-            
-            if len(items) > 1:
-                transactions.append(items)
-        
-        return transactions
-    
-    def _detect_numerical_range_transactions(self):
-        """Create transactions from numerical ranges"""
-        transactions = []
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
-        
-        if len(numeric_cols) < 2:
-            return transactions
-        
-        # Create range-based categories for numeric columns
-        range_mappings = {}
-        for col in numeric_cols[:5]:  # Limit to first 5 numeric columns
-            if self.df[col].nunique() > 10:  # Only for columns with sufficient variance
-                try:
-                    # Create quartile-based ranges
-                    quartiles = self.df[col].quantile([0, 0.25, 0.5, 0.75, 1.0])
-                    range_mappings[col] = {
-                        'very_low': (quartiles[0], quartiles[0.25]),
-                        'low': (quartiles[0.25], quartiles[0.5]),
-                        'high': (quartiles[0.5], quartiles[0.75]),
-                        'very_high': (quartiles[0.75], quartiles[1.0])
-                    }
-                except Exception:
-                    continue
-        
-        if not range_mappings:
-            return transactions
-        
-        # Create transactions from range combinations
-        for idx, row in self.df.iterrows():
-            range_items = []
-            for col, ranges in range_mappings.items():
-                if pd.notna(row[col]):
-                    value = row[col]
-                    for range_name, (min_val, max_val) in ranges.items():
-                        if min_val <= value <= max_val:
-                            range_items.append(f"{col}_{range_name}")
-                            break
-            
-            if len(range_items) > 1:
-                transactions.append(range_items)
-        
-        return transactions
-        
-    def analyze_patterns(self, min_support=0.02):
-        """Enhanced pattern analysis with validation and cleaning"""
+    def analyze_patterns(self, min_support=0.05):
+        """Analyze universal patterns"""
         if not self.transactions:
             return [], []
         
-        # Step 1: Clean and validate all transactions
-        print(f"Starting with {len(self.transactions)} raw transactions...")
-        cleaned_transactions = []
-        
-        for transaction in self.transactions:
-            cleaned_items = self._clean_and_validate_items(transaction)
-            if len(cleaned_items) > 1:  # Only keep transactions with multiple valid items
-                cleaned_transactions.append(cleaned_items)
-        
-        # Update transactions with cleaned data
-        self.transactions = cleaned_transactions
-        
-        if not self.transactions:
-            print("No valid transactions after cleaning")
-            return [], []
-        
-        print(f"Analyzing {len(self.transactions)} cleaned transactions...")
-        
-        # Step 2: Get all unique items from cleaned transactions
+        # Get all unique items
         all_items = set()
         for transaction in self.transactions:
             all_items.update(transaction)
         
         all_items = list(all_items)
-        print(f"Found {len(all_items)} unique cleaned items")
-        
-        if len(all_items) < 2:
-            print("Not enough unique items for pattern analysis")
-            return [], []
-        
-        # Step 3: Adaptive minimum support based on dataset size
-        adaptive_min_support = max(min_support, 2 / len(self.transactions))  # At least 2 occurrences
-        print(f"Using adaptive minimum support: {adaptive_min_support:.3f}")
-        
         frequent_itemsets = []
         
-        # Step 4: Generate 1-itemsets (individual items)
-        item_support = {}
+        # Generate frequent itemsets
         for item in all_items:
             support = self.calculate_support([item])
-            item_support[item] = support
-            if support >= adaptive_min_support:
+            if support >= min_support:
                 frequent_itemsets.append({
                     'itemset': [item],
                     'support': support,
                     'count': int(support * len(self.transactions))
                 })
         
-        print(f"Found {len(frequent_itemsets)} frequent 1-itemsets")
-        
-        # Get frequent items for further processing
-        frequent_items = [item for item in all_items if item_support[item] >= adaptive_min_support]
-        
-        if len(frequent_items) < 2:
-            print("Not enough frequent items for associations")
-            return frequent_itemsets, []
-        
-        # Step 5: Generate 2-itemsets (pairs)
-        frequent_pairs = []
-        pair_count = 0
-        
-        for combo in combinations(frequent_items, 2):
+        # Generate 2-itemsets
+        for combo in combinations(all_items, 2):
             support = self.calculate_support(list(combo))
-            if support >= adaptive_min_support:
+            if support >= min_support:
                 frequent_itemsets.append({
                     'itemset': list(combo),
                     'support': support,
                     'count': int(support * len(self.transactions))
                 })
-                frequent_pairs.append((list(combo), support))
-                pair_count += 1
         
-        print(f"Found {pair_count} frequent 2-itemsets")
-        
-        # Step 6: Generate 3-itemsets (if computationally feasible)
-        if len(frequent_items) <= 50 and len(frequent_items) >= 3:
-            triplet_count = 0
-            for combo in combinations(frequent_items, 3):
-                support = self.calculate_support(list(combo))
-                if support >= adaptive_min_support:
-                    frequent_itemsets.append({
-                        'itemset': list(combo),
-                        'support': support,
-                        'count': int(support * len(self.transactions))
-                    })
-                    triplet_count += 1
-            print(f"Found {triplet_count} frequent 3-itemsets")
-        
-        # Step 7: Generate association rules with adaptive confidence
+        # Generate association rules
         rules = []
-        min_confidence = 0.3  # Starting confidence threshold
-        min_lift = 1.1  # Minimum meaningful lift
-        
         for itemset_data in frequent_itemsets:
-            itemset = itemset_data['itemset']
-            if len(itemset) >= 2:
-                # Generate all possible rule combinations
-                for i in range(1, len(itemset)):
-                    for antecedent in combinations(itemset, i):
-                        antecedent = list(antecedent)
-                        consequent = [item for item in itemset if item not in antecedent]
+            if len(itemset_data['itemset']) == 2:
+                itemset = itemset_data['itemset']
+                for i in range(len(itemset)):
+                    antecedent = [itemset[i]]
+                    consequent = [itemset[1-i]]
+                    
+                    antecedent_support = self.calculate_support(antecedent)
+                    if antecedent_support > 0:
+                        confidence = itemset_data['support'] / antecedent_support
+                        consequent_support = self.calculate_support(consequent)
+                        lift = confidence / consequent_support if consequent_support > 0 else 0
                         
-                        if len(consequent) > 0:
-                            antecedent_support = self.calculate_support(antecedent)
-                            if antecedent_support > 0:
-                                confidence = itemset_data['support'] / antecedent_support
-                                
-                                if confidence >= min_confidence:
-                                    consequent_support = self.calculate_support(consequent)
-                                    lift = confidence / consequent_support if consequent_support > 0 else 0
-                                    
-                                    # Only include rules with meaningful lift
-                                    if lift >= min_lift:
-                                        rules.append({
-                                            'antecedent': antecedent,
-                                            'consequent': consequent,
-                                            'support': itemset_data['support'],
-                                            'confidence': confidence,
-                                            'lift': lift,
-                                            'count': itemset_data['count']
-                                        })
+                        if confidence >= 0.5:
+                            rules.append({
+                                'antecedent': antecedent,
+                                'consequent': consequent,
+                                'support': itemset_data['support'],
+                                'confidence': confidence,
+                                'lift': lift,
+                                'count': itemset_data['count']
+                            })
         
-        print(f"Generated {len(rules)} initial association rules")
-        
-        # Step 8: Validate and filter rules
-        if rules:
-            validated_rules = self._validate_association_rules(
-                rules,
-                max_lift=5.0,      # Filter out suspiciously high lift values
-                min_count=2,       # Require at least 2 occurrences
-                max_confidence=0.95 # Cap confidence to avoid perfect correlations
-            )
-            print(f"After validation: {len(validated_rules)} rules remain")
-            rules = validated_rules
-        
-        # Step 9: Sort rules by quality score (combination of confidence, lift, and support)
-        if rules:
-            for rule in rules:
-                # Quality score combines multiple factors
-                quality_score = (
-                    rule['confidence'] * 0.4 +
-                    min(rule['lift'] / 3.0, 1.0) * 0.3 +  # Normalize lift
-                    rule['support'] * 0.3
-                )
-                rule['quality_score'] = quality_score
-            
-            rules.sort(key=lambda x: x['quality_score'], reverse=True)
-        
-        print(f"Final result: {len(frequent_itemsets)} itemsets, {len(rules)} association rules")
         return frequent_itemsets, rules
-
-    def _clean_and_validate_items(self, items):
-        """Clean and validate items to ensure meaningful patterns"""
-        cleaned_items = []
-        
-        for item in items:
-            item_str = str(item).strip().lower()
-            
-            # Skip meaningless items
-            if self._is_meaningless_item(item_str):
-                continue
-                
-            # Clean the item name
-            cleaned_item = self._clean_item_name(item_str)
-            if cleaned_item and len(cleaned_item) > 2:  # Minimum length requirement
-                cleaned_items.append(cleaned_item)
-        
-        return cleaned_items
-
-    def _is_meaningless_item(self, item):
-        """Check if an item is likely meaningless"""
-        # Skip single digits/numbers (likely IDs or indices)
-        if item.isdigit() and len(item) <= 4:
-            return True
-            
-        # Skip common years (likely not meaningful for associations)
-        if item in ['2020', '2021', '2022', '2023', '2024', '2025', '2026']:
-            return True
-            
-        # Skip very short strings that are likely codes
-        if len(item) <= 2 and item.isalnum():
-            return True
-            
-        # Skip NaN, null, none, etc.
-        if item.lower() in ['nan', 'null', 'none', 'na', '', 'n/a']:
-            return True
-            
-        # Skip items that are just punctuation or whitespace
-        if not any(c.isalnum() for c in item):
-            return True
-        
-        # Skip items that are mostly numbers with minimal text
-        if len(item) > 2 and sum(c.isdigit() for c in item) / len(item) > 0.8:
-            return True
-            
-        return False
-
-    def _clean_item_name(self, item):
-        """Clean item names for better readability"""
-        # Remove common prefixes that might be column names
-        prefixes_to_remove = ['col_', 'column_', 'field_', 'var_', 'item_']
-        for prefix in prefixes_to_remove:
-            if item.startswith(prefix):
-                item = item[len(prefix):]
-        
-        # Replace underscores with spaces for readability
-        item = item.replace('_', ' ')
-        
-        # Remove extra whitespace
-        item = ' '.join(item.split())
-        
-        # Convert to title case for better presentation
-        item = item.title()
-        
-        return item if len(item) > 0 else None
-
-    def _validate_association_rules(self, rules, max_lift=5.0, min_count=2, max_confidence=0.95):
-        """Filter out suspicious association rules"""
-        validated_rules = []
-        
-        for rule in rules:
-            # Skip rules with suspiciously high lift (likely spurious)
-            if rule['lift'] > max_lift:
-                continue
-                
-            # Skip rules with very low absolute count
-            if rule['count'] < min_count:
-                continue
-            
-            # Skip perfect correlations (likely data artifacts)
-            if rule['confidence'] > max_confidence:
-                continue
-                
-            # Skip rules where antecedent and consequent are too similar
-            if self._are_items_too_similar(rule['antecedent'], rule['consequent']):
-                continue
-                
-            # Skip rules with meaningless items (double-check)
-            all_items = rule['antecedent'] + rule['consequent']
-            if any(self._is_meaningless_item(str(item).lower()) for item in all_items):
-                continue
-                
-            validated_rules.append(rule)
-        
-        return validated_rules
-
-    def _are_items_too_similar(self, antecedent, consequent):
-        """Check if antecedent and consequent items are too similar"""
-        # Convert to strings for comparison
-        ant_str = [str(item).lower().strip() for item in antecedent]
-        cons_str = [str(item).lower().strip() for item in consequent]
-        
-        # Check for exact matches
-        if set(ant_str) & set(cons_str):
-            return True
-            
-        # Check for very similar strings
-        for ant in ant_str:
-            for cons in cons_str:
-                # Check if one is substring of another (for strings > 3 chars)
-                if len(ant) > 3 and len(cons) > 3:
-                    if ant in cons or cons in ant:
-                        return True
-                
-                # Check for very similar strings (edit distance)
-                if len(ant) > 3 and len(cons) > 3:
-                    # Simple similarity check - more than 80% character overlap
-                    common_chars = set(ant) & set(cons)
-                    if len(common_chars) / max(len(set(ant)), len(set(cons))) > 0.8:
-                        return True
-        
-        return False
     
     def calculate_support(self, itemset):
         """Calculate support for itemset"""
-        if not self.transactions:
-            return 0
-        
         count = sum(1 for transaction in self.transactions 
                    if all(item in transaction for item in itemset))
-        return count / len(self.transactions)
-    
-    def get_analysis_summary(self):
-        """Get summary of what types of patterns were detected"""
-        summary = {
-            "total_transactions": len(self.transactions),
-            "detection_methods_used": [],
-            "average_transaction_size": 0,
-            "unique_items_count": 0
-        }
-        
-        if self.transactions:
-            all_items = set()
-            transaction_sizes = []
-            
-            for trans in self.transactions:
-                all_items.update(trans)
-                transaction_sizes.append(len(trans))
-            
-            summary["average_transaction_size"] = np.mean(transaction_sizes)
-            summary["unique_items_count"] = len(all_items)
-            
-            # Detect which methods were likely used based on item patterns
-            sample_items = list(all_items)[:10]
-            
-            if any('_' in item for item in sample_items):
-                summary["detection_methods_used"].append("categorical_combinations")
-            
-            if any(any(sep in str(item) for sep in [',', ';', '|']) for item in sample_items):
-                summary["detection_methods_used"].append("separated_values")
-            
-            if any('very_low' in str(item) or 'high' in str(item) for item in sample_items):
-                summary["detection_methods_used"].append("numerical_ranges")
-        
-        return summary
-    def add_pattern_validation_to_analyzer(self):
-        def _clean_and_validate_items(self, items):
-            """Clean and validate items to ensure meaningful patterns"""
-            cleaned_items = []
-            
-            for item in items:
-                item_str = str(item).strip().lower()
-                
-                # Skip meaningless items
-                if self._is_meaningless_item(item_str):
-                    continue
-                    
-                # Clean the item name
-                cleaned_item = self._clean_item_name(item_str)
-                if cleaned_item:
-                    cleaned_items.append(cleaned_item)
-            
-            return cleaned_items
-        
-        def _is_meaningless_item(self, item):
-            """Check if an item is likely meaningless"""
-            # Skip single digits/numbers (likely IDs or indices)
-            if item.isdigit() and len(item) <= 4:
-                return True
-                
-            # Skip common years (likely not meaningful for associations)
-            if item in ['2020', '2021', '2022', '2023', '2024', '2025']:
-                return True
-                
-            # Skip very short strings that are likely codes
-            if len(item) <= 2 and item.isalnum():
-                return True
-                
-            # Skip NaN, null, none, etc.
-            if item.lower() in ['nan', 'null', 'none', 'na', '']:
-                return True
-                
-            # Skip items that are just punctuation or whitespace
-            if not any(c.isalnum() for c in item):
-                return True
-                
-            return False
-        
-        def _clean_item_name(self, item):
-            """Clean item names for better readability"""
-            # Remove common prefixes that might be column names
-            prefixes_to_remove = ['col_', 'column_', 'field_', 'var_']
-            for prefix in prefixes_to_remove:
-                if item.startswith(prefix):
-                    item = item[len(prefix):]
-            
-            # Replace underscores with spaces for readability
-            item = item.replace('_', ' ')
-            
-            # Remove extra whitespace
-            item = ' '.join(item.split())
-            
-            return item if len(item) > 0 else None
-        
-        def _validate_association_rules(self, rules, max_lift=5.0, min_count=3):
-            """Filter out suspicious association rules"""
-            validated_rules = []
-            
-            for rule in rules:
-                # Skip rules with suspiciously high lift (likely spurious)
-                if rule['lift'] > max_lift:
-                    continue
-                    
-                # Skip rules with very low absolute count
-                if rule['count'] < min_count:
-                    continue
-                    
-                # Skip rules where antecedent and consequent are too similar
-                if self._are_items_too_similar(rule['antecedent'], rule['consequent']):
-                    continue
-                    
-                # Skip rules with meaningless items
-                all_items = rule['antecedent'] + rule['consequent']
-                if any(self._is_meaningless_item(str(item)) for item in all_items):
-                    continue
-                    
-                validated_rules.append(rule)
-            
-            return validated_rules
-        
-        def _are_items_too_similar(self, antecedent, consequent):
-            """Check if antecedent and consequent items are too similar"""
-            # Convert to strings for comparison
-            ant_str = [str(item).lower() for item in antecedent]
-            cons_str = [str(item).lower() for item in consequent]
-            
-            # Check for exact matches
-            if set(ant_str) & set(cons_str):
-                return True
-                
-            # Check for very similar strings (same root words)
-            for ant in ant_str:
-                for cons in cons_str:
-                    # Check if one is substring of another
-                    if len(ant) > 3 and len(cons) > 3:
-                        if ant in cons or cons in ant:
-                            return True
-            
-            return False
-        
-        def _enhance_business_insights(self, rules, domain, entity):
-            """Generate more meaningful business insights"""
-            if not rules:
-                return [], []
-            
-            # Analyze the actual items in the rules
-            all_items = set()
-            for rule in rules:
-                all_items.update(rule['antecedent'] + rule['consequent'])
-            
-            # Try to categorize items
-            item_categories = self._categorize_items(list(all_items))
-            
-            key_findings = []
-            recommendations = []
-            
-            # Generate insights based on actual patterns found
-            strongest_rule = max(rules, key=lambda x: x['confidence'])
-            key_findings.append(f"Strongest pattern: {' + '.join(strongest_rule['antecedent'])} → {' + '.join(strongest_rule['consequent'])} ({strongest_rule['confidence']:.1%} confidence)")
-            
-            # More sophisticated lift interpretation
-            highest_lift = max(rules, key=lambda x: x['lift'])
-            if highest_lift['lift'] > 2.0:
-                key_findings.append(f"Most significant association: {' + '.join(highest_lift['antecedent'])} → {' + '.join(highest_lift['consequent'])} (Lift: {highest_lift['lift']:.2f})")
-            else:
-                key_findings.append(f"Moderate association found: {' + '.join(highest_lift['antecedent'])} → {' + '.join(highest_lift['consequent'])} (Lift: {highest_lift['lift']:.2f})")
-            
-            key_findings.append(f"Total validated patterns: {len(rules)}")
-            
-            # Category-based insights
-            if item_categories:
-                key_findings.append(f"Pattern categories detected: {', '.join(item_categories.keys())}")
-            
-            # Domain-specific recommendations based on actual patterns
-            if any('product' in str(item).lower() for item in all_items):
-                recommendations.extend([
-                    "Focus on product bundling strategies based on discovered associations",
-                    "Implement cross-selling recommendations using these product relationships"
-                ])
-            elif any('service' in str(item).lower() for item in all_items):
-                recommendations.extend([
-                    "Develop service package offerings based on usage patterns",
-                    "Create targeted service recommendations for existing customers"
-                ])
-            else:
-                # Generic but more specific recommendations
-                recommendations.extend([
-                    f"Use discovered associations to optimize {entity} groupings",
-                    f"Implement predictive suggestions based on {entity} patterns",
-                    "Monitor these associations over time for trend changes"
-                ])
-            
-            return key_findings, recommendations
-        
-        def _categorize_items(self, items):
-            """Attempt to categorize items for better insights"""
-            categories = {}
-            
-            for item in items:
-                item_str = str(item).lower()
-                
-                # Product categories
-                if any(word in item_str for word in ['product', 'item', 'sku']):
-                    categories.setdefault('products', []).append(item)
-                # Service categories  
-                elif any(word in item_str for word in ['service', 'support', 'help']):
-                    categories.setdefault('services', []).append(item)
-                # Location categories
-                elif any(word in item_str for word in ['location', 'region', 'city', 'state']):
-                    categories.setdefault('locations', []).append(item)
-                # Time categories
-                elif any(word in item_str for word in ['time', 'date', 'period', 'season']):
-                    categories.setdefault('temporal', []).append(item)
-                # Demographics
-                elif any(word in item_str for word in ['age', 'gender', 'demographic']):
-                    categories.setdefault('demographics', []).append(item)
-                else:
-                    categories.setdefault('other', []).append(item)
-            
-            return categories
+        return count / len(self.transactions) if self.transactions else 0
 
 def generate_pattern_business_insights(rules, domain, primary_entity):
     """Generate domain-specific business insights from patterns"""
