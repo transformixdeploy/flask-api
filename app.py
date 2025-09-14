@@ -5,7 +5,7 @@ import json
 import google.generativeai as genai
 from datetime import datetime
 from flask import Flask, request, jsonify
-from collections import defaultdict
+from collections import defaultdict,Counter
 from dotenv import load_dotenv
 from itertools import combinations
 app = Flask(__name__)
@@ -475,107 +475,277 @@ class UniversalMarketBasketAnalyzer:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.transaction_fields = schema_analysis.get('transaction_fields', [])
-        self.transactions = self.prepare_universal_transactions()
+        self.transactions = self.prepare_transactions()
+        self.item_counts = Counter()
+        self.transaction_count = len(self.transactions)
     
-    def prepare_universal_transactions(self):
-        """Prepare transactions from any dataset structure"""
+    def prepare_transactions(self):
+        """Enhanced transaction preparation with multiple format detection"""
         transactions = []
+        text_cols = self.df.select_dtypes(include=['object', 'string']).columns
         
-        # If specific transaction fields are identified
-        if self.transaction_fields:
-            for field in self.transaction_fields:
-                if field in self.df.columns:
-                    for idx, row in self.df.iterrows():
-                        if pd.notna(row[field]):
-                            # Split comma-separated values
-                            items = [item.strip() for item in str(row[field]).split(',')]
-                            items = [item for item in items if item and item != '']
-                            if len(items) > 1:
-                                transactions.append(items)
-        else:
-            # Try to detect transactional patterns automatically
-            text_cols = self.df.select_dtypes(include=['object', 'string']).columns
+        # Strategy 1: Detect comma/delimiter-separated fields
+        for col in text_cols:
+            if self._is_transaction_field(col):
+                col_transactions = self._parse_delimited_field(col)
+                if col_transactions:
+                    transactions.extend(col_transactions)
+                    break  # Use the best field found
+        
+        # Strategy 2: Binary/categorical columns as transaction items
+        if not transactions:
+            transactions = self._create_transactions_from_categories()
+        
+        # Clean and standardize transactions
+        transactions = self._clean_transactions(transactions)
+        
+        # Count all items for support calculation
+        for transaction in transactions:
+            self.item_counts.update(transaction)
             
-            for col in text_cols:
-                # Look for comma-separated values
-                has_commas = self.df[col].astype(str).str.contains(',', na=False).sum()
-                if has_commas > len(self.df) * 0.1:  # If >10% have commas
-                    for idx, row in self.df.iterrows():
-                        if pd.notna(row[col]) and ',' in str(row[col]):
-                            items = [item.strip() for item in str(row[col]).split(',')]
-                            items = [item for item in items if item and item != '']
-                            if len(items) > 1:
-                                transactions.append(items)
-                    break  # Use first suitable column
+        return transactions
+    
+    def _is_transaction_field(self, column):
+        """Determine if a column likely contains transaction data"""
+        sample_data = self.df[column].dropna().astype(str)
+        
+        # Check for common separators
+        separator_counts = {
+            ',': sample_data.str.count(',').sum(),
+            ';': sample_data.str.count(';').sum(),
+            '|': sample_data.str.count('|').sum(),
+            '/': sample_data.str.count('/').sum()
+        }
+        
+        # Field name indicators
+        transaction_indicators = ['purchase', 'product', 'item', 'tag', 'category', 
+                                'history', 'basket', 'cart', 'order']
+        field_score = sum(1 for indicator in transaction_indicators 
+                         if indicator in column.lower())
+        
+        # Return True if field has separators or transaction indicators
+        return max(separator_counts.values()) > 0 or field_score > 0
+    
+    def _parse_delimited_field(self, column):
+        """Parse delimited field into transactions"""
+        transactions = []
+        separators = [',', ';', '|', '/']
+        
+        for separator in separators:
+            test_transactions = []
+            for value in self.df[column].dropna():
+                if separator in str(value):
+                    items = [item.strip().lower() for item in str(value).split(separator)
+                            if item.strip()]
+                    if len(items) > 1:  # Only keep multi-item transactions
+                        test_transactions.append(items)
+            
+            if test_transactions:
+                return test_transactions
+                
+        return []
+    
+    def _create_transactions_from_categories(self):
+        """Create transactions from categorical columns"""
+        transactions = []
+        categorical_cols = []
+        
+        # Find suitable categorical columns
+        for col in self.df.select_dtypes(include=['object', 'string']).columns:
+            unique_ratio = self.df[col].nunique() / len(self.df)
+            if 0.01 <= unique_ratio <= 0.5:  # Reasonable category spread
+                categorical_cols.append(col)
+        
+        if len(categorical_cols) >= 2:
+            # Create transactions from combinations of categorical values
+            for _, row in self.df.iterrows():
+                transaction = []
+                for col in categorical_cols[:5]:  # Limit to 5 columns
+                    if pd.notna(row[col]) and str(row[col]).strip():
+                        transaction.append(f"{col}:{str(row[col]).lower().strip()}")
+                
+                if len(transaction) > 1:
+                    transactions.append(transaction)
         
         return transactions
     
-    def analyze_patterns(self, min_support=0.05):
-        """Analyze universal patterns"""
+    def _clean_transactions(self, transactions):
+        """Clean and standardize transaction data"""
+        cleaned = []
+        for transaction in transactions:
+            # Remove empty items and duplicates
+            clean_items = list(set([item.strip().lower() for item in transaction 
+                                  if item and str(item).strip()]))
+            
+            # Keep transactions with at least 2 items
+            if len(clean_items) >= 2:
+                cleaned.append(clean_items)
+        
+        return cleaned
+    
+    def generate_frequent_itemsets(self, min_support=0.1):
+        """Generate frequent itemsets using improved Apriori algorithm"""
         if not self.transactions:
-            return [], []
+            return {}
         
-        # Get all unique items
-        all_items = set()
+        frequent_itemsets = {}
+        min_count = max(1, int(min_support * self.transaction_count))
+        
+        # Generate 1-itemsets
+        frequent_1_itemsets = set()
+        for item, count in self.item_counts.items():
+            if count >= min_count:
+                frequent_1_itemsets.add(frozenset([item]))
+                frequent_itemsets[frozenset([item])] = {
+                    'support': count / self.transaction_count,
+                    'count': count
+                }
+        
+        if not frequent_1_itemsets:
+            return frequent_itemsets
+        
+        # Generate k-itemsets (k >= 2)
+        current_itemsets = frequent_1_itemsets
+        k = 2
+        
+        while current_itemsets and k <= 4:  # Limit to 4-itemsets for performance
+            candidate_itemsets = self._generate_candidates(current_itemsets, k)
+            frequent_k_itemsets = set()
+            
+            for candidate in candidate_itemsets:
+                count = self._count_itemset_support(candidate)
+                if count >= min_count:
+                    frequent_k_itemsets.add(candidate)
+                    frequent_itemsets[candidate] = {
+                        'support': count / self.transaction_count,
+                        'count': count
+                    }
+            
+            current_itemsets = frequent_k_itemsets
+            k += 1
+        
+        return frequent_itemsets
+    
+    def _generate_candidates(self, frequent_itemsets, k):
+        """Generate candidate itemsets of size k"""
+        candidates = set()
+        itemsets_list = list(frequent_itemsets)
+        
+        for i in range(len(itemsets_list)):
+            for j in range(i + 1, len(itemsets_list)):
+                union = itemsets_list[i] | itemsets_list[j]
+                if len(union) == k:
+                    # Pruning: all subsets must be frequent
+                    if self._all_subsets_frequent(union, frequent_itemsets):
+                        candidates.add(union)
+        
+        return candidates
+    
+    def _all_subsets_frequent(self, itemset, frequent_itemsets):
+        """Check if all (k-1) subsets of itemset are frequent"""
+        if len(itemset) <= 1:
+            return True
+            
+        for item in itemset:
+            subset = itemset - frozenset([item])
+            if subset not in frequent_itemsets:
+                return False
+        return True
+    
+    def _count_itemset_support(self, itemset):
+        """Count how many transactions contain the itemset"""
+        count = 0
+        itemset_set = set(itemset)
         for transaction in self.transactions:
-            all_items.update(transaction)
-        
-        all_items = list(all_items)
-        frequent_itemsets = []
-        
-        # Generate frequent itemsets
-        for item in all_items:
-            support = self.calculate_support([item])
-            if support >= min_support:
-                frequent_itemsets.append({
-                    'itemset': [item],
-                    'support': support,
-                    'count': int(support * len(self.transactions))
-                })
-        
-        # Generate 2-itemsets
-        for combo in combinations(all_items, 2):
-            support = self.calculate_support(list(combo))
-            if support >= min_support:
-                frequent_itemsets.append({
-                    'itemset': list(combo),
-                    'support': support,
-                    'count': int(support * len(self.transactions))
-                })
-        
-        # Generate association rules
+            if itemset_set.issubset(set(transaction)):
+                count += 1
+        return count
+    
+    def generate_association_rules(self, frequent_itemsets, min_confidence=0.5):
+        """Generate association rules from frequent itemsets"""
         rules = []
-        for itemset_data in frequent_itemsets:
-            if len(itemset_data['itemset']) == 2:
-                itemset = itemset_data['itemset']
-                for i in range(len(itemset)):
-                    antecedent = [itemset[i]]
-                    consequent = [itemset[1-i]]
+        
+        for itemset, itemset_data in frequent_itemsets.items():
+            if len(itemset) < 2:
+                continue
+                
+            # Generate all possible rules from this itemset
+            items = list(itemset)
+            
+            # Try all possible antecedent/consequent splits
+            for i in range(1, len(items)):
+                for antecedent in combinations(items, i):
+                    antecedent_set = frozenset(antecedent)
+                    consequent_set = itemset - antecedent_set
                     
-                    antecedent_support = self.calculate_support(antecedent)
-                    if antecedent_support > 0:
+                    if not consequent_set:
+                        continue
+                    
+                    # Calculate confidence
+                    if antecedent_set in frequent_itemsets:
+                        antecedent_support = frequent_itemsets[antecedent_set]['support']
                         confidence = itemset_data['support'] / antecedent_support
-                        consequent_support = self.calculate_support(consequent)
-                        lift = confidence / consequent_support if consequent_support > 0 else 0
                         
-                        if confidence >= 0.5:
+                        if confidence >= min_confidence:
+                            # Calculate lift
+                            consequent_support = sum(frequent_itemsets[cons]['support'] 
+                                                   for cons in frequent_itemsets 
+                                                   if len(cons) == 1 and cons.issubset(consequent_set))
+                            
+                            if consequent_support > 0:
+                                lift = confidence / consequent_support
+                            else:
+                                lift = 0
+                            
                             rules.append({
-                                'antecedent': antecedent,
-                                'consequent': consequent,
+                                'antecedent': list(antecedent_set),
+                                'consequent': list(consequent_set),
                                 'support': itemset_data['support'],
                                 'confidence': confidence,
                                 'lift': lift,
                                 'count': itemset_data['count']
                             })
         
-        return frequent_itemsets, rules
+        # Sort by confidence * lift (compound strength measure)
+        rules.sort(key=lambda x: x['confidence'] * x['lift'], reverse=True)
+        return rules
     
-    def calculate_support(self, itemset):
-        """Calculate support for itemset"""
-        count = sum(1 for transaction in self.transactions 
-                   if all(item in transaction for item in itemset))
-        return count / len(self.transactions) if self.transactions else 0
+    def analyze_patterns(self, min_support=0.1, min_confidence=0.5):
+        """Main analysis method"""
+        frequent_itemsets = self.generate_frequent_itemsets(min_support)
+        
+        if not frequent_itemsets:
+            return [], []
+        
+        # Convert to list format for backward compatibility
+        frequent_list = []
+        for itemset, data in frequent_itemsets.items():
+            frequent_list.append({
+                'itemset': list(itemset),
+                'support': data['support'],
+                'count': data['count']
+            })
+        
+        # Generate association rules
+        rules = self.generate_association_rules(frequent_itemsets, min_confidence)
+        
+        return frequent_list, rules
+    
+    def get_transaction_stats(self):
+        """Get comprehensive transaction statistics"""
+        if not self.transactions:
+            return {}
+        
+        transaction_lengths = [len(t) for t in self.transactions]
+        
+        return {
+            'total_transactions': len(self.transactions),
+            'total_unique_items': len(self.item_counts),
+            'avg_items_per_transaction': np.mean(transaction_lengths),
+            'max_transaction_size': max(transaction_lengths),
+            'min_transaction_size': min(transaction_lengths),
+            'most_frequent_items': self.item_counts.most_common(10)
+        }
 
 def generate_pattern_business_insights(rules, domain, primary_entity):
     """Generate domain-specific business insights from patterns"""
