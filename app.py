@@ -344,7 +344,148 @@ def calculate_data_metrics(df):
             'missing_data_ratio': 0,
             'num_numeric_columns': 0
         }
-class SmartRAGAssistant:
+def analyze_purchase_combinations(self, question):
+        """Specifically handle questions about product combinations/bundles"""
+        
+        # First, run manual debug to see what's actually happening
+        debug_results = self.debug_purchase_combinations_manual()
+        
+        combined_fields = self.detect_combined_fields()
+        
+        if not combined_fields:
+            return {
+                "analysis": "I couldn't find any fields that contain product combination data. The dataset might have product information, but it's not in a format that can be analyzed for purchase combinations.",
+                "confidence": 0.3,
+                "key_findings": ["No parseable combination fields detected"],
+                "relevant_statistics": {},
+                "actionable_insights": [
+                    "Check if purchase data is stored in individual columns",
+                    "Verify the format of purchase-related fields"
+                ],
+                "data_evidence": ["Analyzed field structures for combination patterns"],
+                "confidence_level": "low",
+                "follow_up_questions": [
+                    "What format is the purchase combination data stored in?",
+                    "Are there specific combination columns I should focus on?"
+                ]
+            }
+        
+        # Find the most likely product combination field
+        combination_field = None
+        for field_name in combined_fields.keys():
+            field_lower = field_name.lower()
+            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order', 'history']):
+                combination_field = field_name
+                break
+        
+        if not combination_field:
+            combination_field = list(combined_fields.keys())[0]
+        
+        # Use the same analysis that's cached in get_combined_fields_analysis
+        combined_analysis = self.get_combined_fields_analysis()
+        
+        if combination_field not in combined_analysis:
+            return {
+                "analysis": f"I found a potential combination field '{combination_field}' but couldn't extract meaningful combination data from it.",
+                "confidence": 0.2,
+                "key_findings": ["Combination field found but no patterns extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Check the data format in the combination field"],
+                "data_evidence": [f"Attempted to parse field: {combination_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
+            }
+        
+        # Get combination data from the consistent analysis
+        field_analysis = combined_analysis[combination_field]
+        combination_patterns = field_analysis['combination_patterns']
+        
+        if not combination_patterns['top_10_combinations']:
+            return {
+                "analysis": f"I found the combination field '{combination_field}' but no meaningful patterns were extracted.",
+                "confidence": 0.2,
+                "key_findings": ["Combination field found but no patterns extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Check the data format in the combination field"],
+                "data_evidence": [f"Attempted to parse field: {combination_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
+            }
+        
+        # Get top combinations
+        top_combinations = combination_patterns['top_10_combinations']
+        most_common_combo = top_combinations[0] if top_combinations else None
+        
+        analysis = f"Based on analysis of the '{combination_field}' field, "
+        
+        if most_common_combo:
+            combo_pattern, frequency = most_common_combo
+            total_records = combination_patterns['customers_with_combinations']
+            percentage = (frequency / total_records) * 100 if total_records > 0 else 0
+            
+            # Clean up the combination display
+            combo_display = combo_pattern.replace(',', ' + ').title()
+            
+            analysis += f"the most common purchase combination is '{combo_display}' appearing {frequency:,} times "
+            analysis += f"({percentage:.1f}% of customers with purchase data). "
+            
+            if len(top_combinations) > 1:
+                analysis += f"The top 5 most popular combinations are: "
+                top_5_display = []
+                for combo, count in top_combinations[:5]:
+                    clean_combo = combo.replace(',', ' + ').title()
+                    top_5_display.append(f"{clean_combo} ({count:,} times)")
+                analysis += "; ".join(top_5_display) + ". "
+        
+        analysis += f"In total, there are {combination_patterns['total_unique_combinations']:,} unique purchase combinations across {combination_patterns['customers_with_combinations']:,} customers."
+        
+        # Add debug info to the analysis
+        if debug_results and debug_results['butter_rice_variations']:
+            analysis += f"\n\nDEBUG INFO: Found {len(debug_results['butter_rice_variations'])} Butter+Rice variations in manual analysis."
+        
+        # Build key findings
+        key_findings = []
+        if most_common_combo:
+            combo_display = most_common_combo[0].replace(',', ' + ').title()
+            key_findings.append(f"Most common combination: {combo_display} ({most_common_combo[1]:,} occurrences)")
+        
+        key_findings.extend([
+            f"Total unique combinations: {combination_patterns['total_unique_combinations']:,}",
+            f"Customers with combination data: {combination_patterns['customers_with_combinations']:,}",
+            f"Average combination size: {combination_patterns['avg_items_per_combination']:.1f} items"
+        ])
+        
+        # Build relevant statistics
+        relevant_stats = {
+            "most_common_combination_count": most_common_combo[1] if most_common_combo else 0,
+            "total_unique_combinations": combination_patterns['total_unique_combinations'],
+            "customers_with_combinations": combination_patterns['customers_with_combinations'],
+            "avg_items_per_combination": combination_patterns['avg_items_per_combination']
+        }
+        
+        return {
+            "analysis": analysis,
+            "confidence": 0.9,
+            "key_findings": key_findings,
+            "relevant_statistics": relevant_stats,
+            "actionable_insights": [
+                f"Create targeted bundles based on the '{most_common_combo[0].replace(',', ' + ').title()}' combination" if most_common_combo else "Analyze combination patterns for bundling opportunities",
+                "Develop cross-selling strategies based on popular combinations",
+                "Consider promotional pricing for frequent combinations",
+                "Analyze seasonal trends in popular combinations"
+            ],
+            "data_evidence": [
+                f"Analyzed {combination_patterns['customers_with_combinations']:,} customer purchase combinations",
+                f"Identified {combination_patterns['total_unique_combinations']:,} unique combination patterns",
+                f"Parsed combinations from '{combination_field}' field"
+            ],
+            "confidence_level": "high",
+            "follow_up_questions": [
+                "What customer segments prefer which combinations?",
+                "How do combination preferences change over time?",
+                "Which combinations have the highest profit margins?"
+            ]
+        }class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
@@ -862,6 +1003,11 @@ CATEGORICAL DATA INSIGHTS:
 COMBINED FIELDS ANALYSIS (Products, Tags, etc.):
 {json.dumps(data_context['combined_fields_analysis'], indent=2)}
 
+IMPORTANT: When analyzing combined fields, use the data provided above consistently:
+- For individual item popularity: Use 'individual_items' -> 'top_10_individual_items'
+- For combination patterns: Use 'combination_patterns' -> 'top_10_combinations'
+- Always reference the SAME data source to avoid contradictions
+
 DATA QUALITY METRICS:
 {json.dumps(data_context['data_quality'], indent=2)}
 
@@ -871,12 +1017,14 @@ SAMPLE DATA (First {len(data_context['sample_data'])} records):
 USER QUESTION: "{question}"
 
 Instructions:
-1. Pay special attention to COMBINED FIELDS ANALYSIS - this contains parsed individual items from combined fields
-2. If the question asks about individual products, items, or tags, use the combined fields analysis
-3. For questions like "most purchased product", use the individual item frequency data, not the combination data
-4. Provide specific, data-driven answers based on the actual dataset
-5. Include relevant statistics, trends, and patterns
-6. If you need to make assumptions, state them clearly
+1. Pay special attention to COMBINED FIELDS ANALYSIS - this contains both individual items AND combination patterns
+2. For individual products: Use the 'individual_items' section
+3. For product combinations: Use the 'combination_patterns' section
+4. ALWAYS reference the exact same data shown above - don't perform separate analysis
+5. Be consistent with naming and counts across different questions
+6. Provide specific, data-driven answers based on the actual dataset
+7. Include relevant statistics, trends, and patterns
+8. If you need to make assumptions, state them clearly
 
 Respond in JSON format:
 {{
@@ -1266,6 +1414,7 @@ def question_answer():
         }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
 
 
 
