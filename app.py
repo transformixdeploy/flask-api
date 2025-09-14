@@ -475,8 +475,8 @@ class UniversalMarketBasketAnalyzer:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.transactions = self.prepare_transactions()
         self.item_counts = Counter()
+        self.transactions = self.prepare_transactions()
         self.transaction_count = len(self.transactions)
     
     def prepare_transactions(self):
