@@ -636,13 +636,24 @@ class SmartRAGAssistant:
         for field_name, field_info in combined_fields.items():
             parsed_data = self.parse_combined_field(field_name, field_info['separator'])
             if parsed_data:
+                # Add combination patterns analysis
+                combination_patterns = self.analyze_combination_patterns(field_name, field_info['separator'])
+                
                 analysis[field_name] = {
                     'field_type': field_info['type'],
                     'separator_used': field_info['separator'],
-                    'total_individual_items': parsed_data['total_individual_items'],
-                    'unique_items_count': parsed_data['unique_items'],
-                    'top_10_items': parsed_data['most_common'][:10],
-                    'coverage_stats': parsed_data['coverage_stats']
+                    'individual_items': {
+                        'total_individual_items': parsed_data['total_individual_items'],
+                        'unique_items_count': parsed_data['unique_items'],
+                        'top_10_individual_items': parsed_data['most_common'][:10],
+                        'coverage_stats': parsed_data['coverage_stats']
+                    },
+                    'combination_patterns': {
+                        'customers_with_combinations': combination_patterns['total_customers_with_combinations'] if combination_patterns else 0,
+                        'total_unique_combinations': combination_patterns['unique_combinations'] if combination_patterns else 0,
+                        'top_10_combinations': combination_patterns['most_common_combinations'][:10] if combination_patterns else [],
+                        'avg_items_per_combination': combination_patterns['avg_items_per_combination'] if combination_patterns else 0
+                    }
                 }
         
         return analysis
@@ -721,21 +732,156 @@ class SmartRAGAssistant:
         question_lower = question.lower()
         
         # Detect product/item-related questions
-        product_keywords = ['product', 'item', 'purchase', 'bought', 'buy', 'sold', 'selling']
+        product_keywords = ['product', 'item', 'purchase', 'bought', 'buy', 'sold', 'selling', 'offer', 'provide', 'sell']
         ranking_keywords = ['most', 'popular', 'common', 'frequent', 'top', 'best']
         combination_keywords = ['combination', 'combo', 'together', 'bundle', 'pair', 'group', 'set']
+        unique_keywords = ['unique', 'different', 'distinct', 'variety', 'types', 'kinds', 'catalog', 'range']
         
         is_product_question = any(keyword in question_lower for keyword in product_keywords)
         is_ranking_question = any(keyword in question_lower for keyword in ranking_keywords)
         is_combination_question = any(keyword in question_lower for keyword in combination_keywords)
+        is_unique_question = any(keyword in question_lower for keyword in unique_keywords)
         
-        if is_product_question and is_ranking_question:
+        # Handle unique products question
+        if is_product_question and is_unique_question:
+            return self.analyze_unique_products(question)
+        
+        # Handle product popularity/ranking questions
+        elif is_product_question and is_ranking_question:
             if is_combination_question:
                 return self.analyze_purchase_combinations(question)
             else:
                 return self.analyze_product_popularity(question)
         
         return None
+    
+    def analyze_unique_products(self, question):
+        """Specifically handle questions about unique products/items offered"""
+        combined_fields = self.detect_combined_fields()
+        
+        if not combined_fields:
+            return {
+                "analysis": "I couldn't find any fields that contain product or purchase data in a format that can be analyzed for unique products. The dataset might have product information stored differently.",
+                "confidence": 0.3,
+                "key_findings": ["No parseable product fields detected"],
+                "relevant_statistics": {},
+                "actionable_insights": [
+                    "Check if product data is stored in separate columns",
+                    "Verify the format of product-related fields",
+                    "Consider if products are encoded in a different way"
+                ],
+                "data_evidence": ["Analyzed field structures for product patterns"],
+                "confidence_level": "low",
+                "follow_up_questions": [
+                    "What format is the product data stored in?",
+                    "Are there specific product columns I should examine?"
+                ]
+            }
+        
+        # Find the most likely product field
+        product_field = None
+        for field_name in combined_fields.keys():
+            field_lower = field_name.lower()
+            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order', 'history']):
+                product_field = field_name
+                break
+        
+        if not product_field:
+            product_field = list(combined_fields.keys())[0]
+        
+        # Parse the field to get individual products
+        parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
+        
+        if not parsed_data or not parsed_data['most_common']:
+            return {
+                "analysis": f"I found a potential product field '{product_field}' but couldn't extract meaningful product data from it.",
+                "confidence": 0.2,
+                "key_findings": ["Product field found but no data extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Verify the data format in the product field"],
+                "data_evidence": [f"Attempted to parse field: {product_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What does the product data look like in your dataset?"]
+            }
+        
+        # Build comprehensive analysis
+        unique_products = list(parsed_data['item_frequency'].keys())
+        total_unique = len(unique_products)
+        top_products = parsed_data['most_common'][:10]  # Top 10 products
+        
+        # Create a formatted list of products
+        product_list = [product.title() for product in unique_products]
+        top_10_names = [name.title() for name, count in top_products]
+        
+        analysis = f"Based on analysis of the '{product_field}' field, your business offers {total_unique} unique products. "
+        
+        if top_products:
+            analysis += f"The top 10 most frequently purchased items are: {', '.join(top_10_names[:-1])}, and {top_10_names[-1]}. "
+        
+        analysis += f"These products appear across {parsed_data['coverage_stats']['records_with_data']:,} customer purchase records, "
+        analysis += f"with an average of {parsed_data['coverage_stats']['average_items_per_record']:.1f} items per customer purchase history."
+        
+        # Additional insights about product diversity
+        total_purchases = parsed_data['total_individual_items']
+        if total_purchases > 0:
+            diversity_ratio = (total_unique / total_purchases) * 100
+            analysis += f" The product diversity ratio is {diversity_ratio:.1f}%, indicating "
+            if diversity_ratio > 20:
+                analysis += "high product variety with many unique items."
+            elif diversity_ratio > 10:
+                analysis += "moderate product variety."
+            else:
+                analysis += "focused product range with some items being purchased frequently."
+        
+        # Build key findings
+        key_findings = [
+            f"Total unique products offered: {total_unique}",
+            f"Most popular product: {top_products[0][0].title()} ({top_products[0][1]:,} purchases)" if top_products else "No purchase data available",
+            f"Product catalog spans {parsed_data['coverage_stats']['records_with_data']:,} customer records",
+            f"Average items per customer: {parsed_data['coverage_stats']['average_items_per_record']:.1f}"
+        ]
+        
+        # Build relevant statistics
+        relevant_stats = {
+            "total_unique_products": total_unique,
+            "total_purchase_instances": parsed_data['total_individual_items'],
+            "customers_with_purchase_data": parsed_data['coverage_stats']['records_with_data'],
+            "most_popular_product_purchases": top_products[0][1] if top_products else 0,
+            "avg_products_per_customer": parsed_data['coverage_stats']['average_items_per_record']
+        }
+        
+        # Generate actionable insights
+        actionable_insights = [
+            "Consider creating product categories to better organize your diverse catalog",
+            f"Focus marketing on the top 5 products: {', '.join([name.title() for name, _ in top_products[:5]])}" if len(top_products) >= 5 else "Analyze top products for marketing focus",
+            "Investigate low-performing products for potential discontinuation or promotion",
+            "Use purchase patterns to develop product recommendation systems"
+        ]
+        
+        # Add category-specific insights if applicable
+        if total_unique > 50:
+            actionable_insights.append("Consider implementing product search and filtering due to large catalog size")
+        elif total_unique < 10:
+            actionable_insights.append("Explore opportunities to expand product offerings")
+        
+        return {
+            "analysis": analysis,
+            "confidence": 0.95,
+            "key_findings": key_findings,
+            "relevant_statistics": relevant_stats,
+            "actionable_insights": actionable_insights,
+            "data_evidence": [
+                f"Parsed {total_unique} unique products from '{product_field}' field",
+                f"Analyzed {parsed_data['coverage_stats']['records_with_data']:,} customer purchase records",
+                f"Processed {total_purchases:,} total purchase instances"
+            ],
+            "confidence_level": "high",
+            "follow_up_questions": [
+                "Which product categories generate the most revenue?",
+                "What are the seasonal trends for your top products?",
+                "How do product preferences vary across customer segments?"
+            ]
+        }
     
     def analyze_product_popularity(self, question):
         """Specifically handle questions about product popularity/frequency"""
@@ -881,10 +1027,10 @@ class SmartRAGAssistant:
         if not combination_field:
             combination_field = list(combined_fields.keys())[0]
         
-        # Analyze combinations (full strings, not individual items)
-        combination_analysis = self.analyze_combination_patterns(combination_field, combined_fields[combination_field]['separator'])
+        # Use the same analysis that's cached in get_combined_fields_analysis
+        combined_analysis = self.get_combined_fields_analysis()
         
-        if not combination_analysis or not combination_analysis['most_common_combinations']:
+        if combination_field not in combined_analysis:
             return {
                 "analysis": f"I found a potential combination field '{combination_field}' but couldn't extract meaningful combination data from it.",
                 "confidence": 0.2,
@@ -896,15 +1042,31 @@ class SmartRAGAssistant:
                 "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
             }
         
+        # Get combination data from the consistent analysis
+        field_analysis = combined_analysis[combination_field]
+        combination_patterns = field_analysis['combination_patterns']
+        
+        if not combination_patterns['top_10_combinations']:
+            return {
+                "analysis": f"I found the combination field '{combination_field}' but no meaningful patterns were extracted.",
+                "confidence": 0.2,
+                "key_findings": ["Combination field found but no patterns extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Check the data format in the combination field"],
+                "data_evidence": [f"Attempted to parse field: {combination_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
+            }
+        
         # Get top combinations
-        top_combinations = combination_analysis['most_common_combinations'][:10]
+        top_combinations = combination_patterns['top_10_combinations']
         most_common_combo = top_combinations[0] if top_combinations else None
         
         analysis = f"Based on analysis of the '{combination_field}' field, "
         
         if most_common_combo:
             combo_pattern, frequency = most_common_combo
-            total_records = combination_analysis['total_customers_with_combinations']
+            total_records = combination_patterns['customers_with_combinations']
             percentage = (frequency / total_records) * 100 if total_records > 0 else 0
             
             # Clean up the combination display
@@ -921,7 +1083,7 @@ class SmartRAGAssistant:
                     top_5_display.append(f"{clean_combo} ({count:,} times)")
                 analysis += "; ".join(top_5_display) + ". "
         
-        analysis += f"In total, there are {combination_analysis['unique_combinations']:,} unique purchase combinations across {combination_analysis['total_customers_with_combinations']:,} customers."
+        analysis += f"In total, there are {combination_patterns['total_unique_combinations']:,} unique purchase combinations across {combination_patterns['customers_with_combinations']:,} customers."
         
         # Build key findings
         key_findings = []
@@ -930,17 +1092,17 @@ class SmartRAGAssistant:
             key_findings.append(f"Most common combination: {combo_display} ({most_common_combo[1]:,} occurrences)")
         
         key_findings.extend([
-            f"Total unique combinations: {combination_analysis['unique_combinations']:,}",
-            f"Customers with combination data: {combination_analysis['total_customers_with_combinations']:,}",
-            f"Average combination size: {combination_analysis['avg_items_per_combination']:.1f} items"
+            f"Total unique combinations: {combination_patterns['total_unique_combinations']:,}",
+            f"Customers with combination data: {combination_patterns['customers_with_combinations']:,}",
+            f"Average combination size: {combination_patterns['avg_items_per_combination']:.1f} items"
         ])
         
         # Build relevant statistics
         relevant_stats = {
             "most_common_combination_count": most_common_combo[1] if most_common_combo else 0,
-            "total_unique_combinations": combination_analysis['unique_combinations'],
-            "customers_with_combinations": combination_analysis['total_customers_with_combinations'],
-            "avg_items_per_combination": combination_analysis['avg_items_per_combination']
+            "total_unique_combinations": combination_patterns['total_unique_combinations'],
+            "customers_with_combinations": combination_patterns['customers_with_combinations'],
+            "avg_items_per_combination": combination_patterns['avg_items_per_combination']
         }
         
         return {
@@ -955,8 +1117,8 @@ class SmartRAGAssistant:
                 "Analyze seasonal trends in popular combinations"
             ],
             "data_evidence": [
-                f"Analyzed {combination_analysis['total_customers_with_combinations']:,} customer purchase combinations",
-                f"Identified {combination_analysis['unique_combinations']:,} unique combination patterns",
+                f"Analyzed {combination_patterns['customers_with_combinations']:,} customer purchase combinations",
+                f"Identified {combination_patterns['total_unique_combinations']:,} unique combination patterns",
                 f"Parsed combinations from '{combination_field}' field"
             ],
             "confidence_level": "high",
@@ -1415,6 +1577,7 @@ def question_answer():
         }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
 
 
 
