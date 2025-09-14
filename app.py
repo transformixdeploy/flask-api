@@ -485,7 +485,8 @@ def analyze_purchase_combinations(self, question):
                 "How do combination preferences change over time?",
                 "Which combinations have the highest profit margins?"
             ]
-        }class SmartRAGAssistant:
+        }
+class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
@@ -1414,6 +1415,7 @@ def question_answer():
         }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
 
 
 
