@@ -511,7 +511,7 @@ class UniversalMarketBasketAnalyzer:
         
         return transactions
     
-    def analyze_patterns(self, min_support=0.1):
+    def analyze_patterns(self, min_support=0.05):
         """Analyze universal patterns"""
         if not self.transactions:
             return [], []
@@ -2210,8 +2210,8 @@ def pattern_analysis_analyze():
                 "message": "No file selected"
             }), 400
 
-        # Get min_support from form data (default to 0.1)
-        min_support = float(request.form.get('min_support', 0.1))
+        # Get min_support from form data (default to 0.05)
+        min_support = float(request.form.get('min_support', 0.05))
 
         # Parse CSV file
         encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
