@@ -349,6 +349,82 @@ class SmartRAGAssistant:
         self.df = df
         self.schema_analysis = schema_analysis
         self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Cache for processed data
+        self._parsed_fields_cache = {}
+    
+    def detect_combined_fields(self):
+        """Detect fields that might contain combined/separated data like products, tags, etc."""
+        combined_fields = {}
+        text_cols = self.df.select_dtypes(include=['object', 'string']).columns
+        
+        for col in text_cols:
+            # Check if column contains common separators
+            sample_values = self.df[col].dropna().head(100).astype(str)
+            
+            separators_found = []
+            common_separators = [',', ';', '|', '/', '&', '+', '-']
+            
+            for sep in common_separators:
+                if any(sep in str(val) for val in sample_values):
+                    separators_found.append(sep)
+            
+            # Check if field name suggests it contains multiple items
+            field_indicators = ['history', 'products', 'items', 'tags', 'categories', 'skills', 'interests']
+            if any(indicator in col.lower() for indicator in field_indicators) or separators_found:
+                # Determine the most likely separator
+                separator_counts = {}
+                for sep in separators_found:
+                    count = sum(str(val).count(sep) for val in sample_values)
+                    separator_counts[sep] = count
+                
+                if separator_counts:
+                    most_common_sep = max(separator_counts, key=separator_counts.get)
+                    combined_fields[col] = {
+                        'separator': most_common_sep,
+                        'type': 'combined_items'
+                    }
+        
+        return combined_fields
+    
+    def parse_combined_field(self, column_name, separator=','):
+        """Parse a combined field into individual items and return frequency analysis"""
+        if column_name in self._parsed_fields_cache:
+            return self._parsed_fields_cache[column_name]
+        
+        if column_name not in self.df.columns:
+            return None
+        
+        # Extract all individual items
+        all_items = []
+        for value in self.df[column_name].dropna():
+            if pd.isna(value):
+                continue
+            # Split by separator and clean items
+            items = [item.strip().lower() for item in str(value).split(separator) if item.strip()]
+            all_items.extend(items)
+        
+        if not all_items:
+            return None
+        
+        # Count frequency of each item
+        from collections import Counter
+        item_counts = Counter(all_items)
+        
+        # Create analysis
+        analysis = {
+            'total_individual_items': len(all_items),
+            'unique_items': len(item_counts),
+            'most_common': item_counts.most_common(20),  # Top 20 items
+            'item_frequency': dict(item_counts),
+            'coverage_stats': {
+                'records_with_data': int(self.df[column_name].count()),
+                'average_items_per_record': len(all_items) / max(1, self.df[column_name].count())
+            }
+        }
+        
+        # Cache the result
+        self._parsed_fields_cache[column_name] = analysis
+        return analysis
     
     def create_data_context(self, max_rows=100):
         context = {
@@ -363,9 +439,29 @@ class SmartRAGAssistant:
             "statistical_summary": self.get_statistical_summary(),
             "categorical_insights": self.get_categorical_insights(),
             "data_quality": self.analyze_data_quality(),
-            "business_insights": self.schema_analysis.get('insights', [])
+            "business_insights": self.schema_analysis.get('insights', []),
+            "combined_fields_analysis": self.get_combined_fields_analysis()  # New addition
         }
         return context
+    
+    def get_combined_fields_analysis(self):
+        """Analyze fields that contain combined data like products, tags, etc."""
+        combined_fields = self.detect_combined_fields()
+        analysis = {}
+        
+        for field_name, field_info in combined_fields.items():
+            parsed_data = self.parse_combined_field(field_name, field_info['separator'])
+            if parsed_data:
+                analysis[field_name] = {
+                    'field_type': field_info['type'],
+                    'separator_used': field_info['separator'],
+                    'total_individual_items': parsed_data['total_individual_items'],
+                    'unique_items_count': parsed_data['unique_items'],
+                    'top_10_items': parsed_data['most_common'][:10],
+                    'coverage_stats': parsed_data['coverage_stats']
+                }
+        
+        return analysis
     
     def get_statistical_summary(self):
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns
@@ -385,22 +481,13 @@ class SmartRAGAssistant:
                     sum_val = float(self.df[col].sum())
                     unique_count = int(self.df[col].nunique())
                     
-                    if pd.isna(mean_val):
-                        mean_val = 0.0
-                    if pd.isna(median_val):
-                        median_val = 0.0
-                    if pd.isna(std_val):
-                        std_val = 0.0
-                    if pd.isna(min_val):
-                        min_val = 0.0
-                    if pd.isna(max_val):
-                        max_val = 0.0
-                    if pd.isna(q25_val):
-                        q25_val = 0.0
-                    if pd.isna(q75_val):
-                        q75_val = 0.0
-                    if pd.isna(sum_val):
-                        sum_val = 0.0
+                    # Handle NaN values
+                    for val_name, val in [('mean_val', mean_val), ('median_val', median_val), 
+                                        ('std_val', std_val), ('min_val', min_val), 
+                                        ('max_val', max_val), ('q25_val', q25_val), 
+                                        ('q75_val', q75_val), ('sum_val', sum_val)]:
+                        if pd.isna(val):
+                            locals()[val_name] = 0.0
                     
                     summary[col] = {
                         "count": count_val,
@@ -447,12 +534,15 @@ class SmartRAGAssistant:
     
     def answer_question(self, question):
         try:
+            # Check if question is asking about individual items in combined fields
+            specific_analysis = self.handle_specific_question_types(question)
+            if specific_analysis:
+                return specific_analysis
+            
+            # Continue with general RAG approach
             data_context = self.create_data_context()
-            
             prompt = self.create_rag_prompt(question, data_context)
-            
             response = self.model.generate_content(prompt)
-            
             parsed_response = self.parse_rag_response(response.text, question)
             
             return parsed_response
@@ -460,8 +550,134 @@ class SmartRAGAssistant:
         except Exception as e:
             return self.fallback_answer(question, str(e))
     
-    def create_rag_prompt(self, question, data_context):
+    def handle_specific_question_types(self, question):
+        """Handle specific question types that require special processing"""
+        question_lower = question.lower()
         
+        # Detect product/item-related questions
+        product_keywords = ['product', 'item', 'purchase', 'bought', 'buy', 'sold', 'selling']
+        ranking_keywords = ['most', 'popular', 'common', 'frequent', 'top', 'best']
+        
+        is_product_question = any(keyword in question_lower for keyword in product_keywords)
+        is_ranking_question = any(keyword in question_lower for keyword in ranking_keywords)
+        
+        if is_product_question and is_ranking_question:
+            return self.analyze_product_popularity(question)
+        
+        return None
+    
+    def analyze_product_popularity(self, question):
+        """Specifically handle questions about product popularity/frequency"""
+        combined_fields = self.detect_combined_fields()
+        
+        if not combined_fields:
+            return {
+                "analysis": "I couldn't find any fields that contain product or item data in a format that can be analyzed for individual product popularity. The dataset might have product information, but it's not in a separable format.",
+                "confidence": 0.3,
+                "key_findings": ["No parseable product fields detected"],
+                "relevant_statistics": {},
+                "actionable_insights": [
+                    "Check if product data is stored in individual columns",
+                    "Verify the format of product-related fields",
+                    "Consider data preprocessing if products are encoded differently"
+                ],
+                "data_evidence": ["Analyzed field structures for product patterns"],
+                "confidence_level": "low",
+                "follow_up_questions": [
+                    "What format is the product data stored in?",
+                    "Are there specific product columns I should focus on?"
+                ]
+            }
+        
+        # Find the most likely product field
+        product_field = None
+        for field_name in combined_fields.keys():
+            field_lower = field_name.lower()
+            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order']):
+                product_field = field_name
+                break
+        
+        if not product_field:
+            product_field = list(combined_fields.keys())[0]  # Take the first combined field
+        
+        # Parse the field
+        parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
+        
+        if not parsed_data or not parsed_data['most_common']:
+            return {
+                "analysis": f"I found a potential product field '{product_field}' but couldn't extract meaningful product data from it. The field might be empty or in an unexpected format.",
+                "confidence": 0.2,
+                "key_findings": ["Product field found but no data extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Check the data format in the product field"],
+                "data_evidence": [f"Attempted to parse field: {product_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What does the product data look like in your dataset?"]
+            }
+        
+        # Get top products
+        top_products = parsed_data['most_common'][:10]
+        most_popular_product = top_products[0] if top_products else None
+        
+        analysis = f"Based on analysis of the '{product_field}' field, "
+        
+        if most_popular_product:
+            product_name, frequency = most_popular_product
+            total_records = parsed_data['coverage_stats']['records_with_data']
+            percentage = (frequency / total_records) * 100 if total_records > 0 else 0
+            
+            analysis += f"the most purchased product is '{product_name.title()}' with {frequency:,} purchases "
+            analysis += f"appearing in {percentage:.1f}% of customer records. "
+            
+            if len(top_products) > 1:
+                analysis += f"The top 5 most popular products are: "
+                top_5 = [f"{name.title()} ({count:,} purchases)" for name, count in top_products[:5]]
+                analysis += ", ".join(top_5) + ". "
+        
+        analysis += f"In total, there are {parsed_data['unique_items']:,} unique products across {parsed_data['total_individual_items']:,} total purchase instances."
+        
+        # Build key findings
+        key_findings = []
+        if most_popular_product:
+            key_findings.append(f"Most popular product: {most_popular_product[0].title()} ({most_popular_product[1]:,} purchases)")
+        key_findings.append(f"Total unique products: {parsed_data['unique_items']:,}")
+        key_findings.append(f"Total purchase instances: {parsed_data['total_individual_items']:,}")
+        key_findings.append(f"Average products per customer: {parsed_data['coverage_stats']['average_items_per_record']:.1f}")
+        
+        # Build relevant statistics
+        relevant_stats = {
+            "most_popular_product_count": most_popular_product[1] if most_popular_product else 0,
+            "total_unique_products": parsed_data['unique_items'],
+            "total_purchase_instances": parsed_data['total_individual_items'],
+            "customers_with_purchase_data": parsed_data['coverage_stats']['records_with_data'],
+            "avg_products_per_customer": parsed_data['coverage_stats']['average_items_per_record']
+        }
+        
+        return {
+            "analysis": analysis,
+            "confidence": 0.9,
+            "key_findings": key_findings,
+            "relevant_statistics": relevant_stats,
+            "actionable_insights": [
+                f"Focus marketing efforts on promoting {most_popular_product[0].title()} variants" if most_popular_product else "Analyze product distribution",
+                "Investigate why certain products are more popular",
+                "Consider bundling popular products with less popular ones",
+                "Analyze seasonal trends in product purchases"
+            ],
+            "data_evidence": [
+                f"Analyzed {parsed_data['coverage_stats']['records_with_data']:,} customer purchase records",
+                f"Parsed individual products from '{product_field}' field",
+                f"Separated {parsed_data['total_individual_items']:,} individual product purchases"
+            ],
+            "confidence_level": "high",
+            "follow_up_questions": [
+                "What are the characteristics of customers who buy the most popular products?",
+                "How do product preferences vary by customer segments?",
+                "What's the seasonal trend for the top products?"
+            ]
+        }
+    
+    def create_rag_prompt(self, question, data_context):
         prompt = f"""
 You are a Smart Business Intelligence Assistant with direct access to the following dataset:
 
@@ -477,6 +693,9 @@ STATISTICAL SUMMARY:
 CATEGORICAL DATA INSIGHTS:
 {json.dumps(data_context['categorical_insights'], indent=2)}
 
+COMBINED FIELDS ANALYSIS (Products, Tags, etc.):
+{json.dumps(data_context['combined_fields_analysis'], indent=2)}
+
 DATA QUALITY METRICS:
 {json.dumps(data_context['data_quality'], indent=2)}
 
@@ -486,11 +705,11 @@ SAMPLE DATA (First {len(data_context['sample_data'])} records):
 USER QUESTION: "{question}"
 
 Instructions:
-1. Analyze the question in the context of the available data
-2. Provide specific, data-driven answers based on the actual dataset
-3. Include relevant statistics, trends, and patterns
-4. If the question requires filtering or specific calculations, explain what you found
-5. Suggest actionable insights where appropriate
+1. Pay special attention to COMBINED FIELDS ANALYSIS - this contains parsed individual items from combined fields
+2. If the question asks about individual products, items, or tags, use the combined fields analysis
+3. For questions like "most purchased product", use the individual item frequency data, not the combination data
+4. Provide specific, data-driven answers based on the actual dataset
+5. Include relevant statistics, trends, and patterns
 6. If you need to make assumptions, state them clearly
 
 Respond in JSON format:
@@ -522,7 +741,7 @@ Be specific, use actual data values, and provide concrete insights based on the 
             
             confidence = parsed.get('confidence', 0.7)
             if confidence > 1:
-                confidence = confidence / 100  
+                confidence = confidence / 100
             
             return {
                 "analysis": parsed.get('analysis', ''),
@@ -881,3 +1100,4 @@ def question_answer():
         }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
