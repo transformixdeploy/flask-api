@@ -7,6 +7,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from collections import defaultdict
 from dotenv import load_dotenv
+from itertools import combinations
 app = Flask(__name__)
 load_dotenv()
 GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY")
@@ -344,12 +345,7 @@ def calculate_data_metrics(df):
             'missing_data_ratio': 0,
             'num_numeric_columns': 0
         }
-def analyze_purchase_combinations(self, question):
-        """Specifically handle questions about product combinations/bundles"""
-        
-        # First, run manual debug to see what's actually happening
-        debug_results = self.debug_purchase_combinations_manual()
-        
+def analyze_purchase_combinations(self, question):        
         combined_fields = self.detect_combined_fields()
         
         if not combined_fields:
@@ -370,7 +366,6 @@ def analyze_purchase_combinations(self, question):
                 ]
             }
         
-        # Find the most likely product combination field
         combination_field = None
         for field_name in combined_fields.keys():
             field_lower = field_name.lower()
@@ -381,7 +376,6 @@ def analyze_purchase_combinations(self, question):
         if not combination_field:
             combination_field = list(combined_fields.keys())[0]
         
-        # Use the same analysis that's cached in get_combined_fields_analysis
         combined_analysis = self.get_combined_fields_analysis()
         
         if combination_field not in combined_analysis:
@@ -396,7 +390,6 @@ def analyze_purchase_combinations(self, question):
                 "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
             }
         
-        # Get combination data from the consistent analysis
         field_analysis = combined_analysis[combination_field]
         combination_patterns = field_analysis['combination_patterns']
         
@@ -412,7 +405,6 @@ def analyze_purchase_combinations(self, question):
                 "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
             }
         
-        # Get top combinations
         top_combinations = combination_patterns['top_10_combinations']
         most_common_combo = top_combinations[0] if top_combinations else None
         
@@ -423,7 +415,6 @@ def analyze_purchase_combinations(self, question):
             total_records = combination_patterns['customers_with_combinations']
             percentage = (frequency / total_records) * 100 if total_records > 0 else 0
             
-            # Clean up the combination display
             combo_display = combo_pattern.replace(',', ' + ').title()
             
             analysis += f"the most common purchase combination is '{combo_display}' appearing {frequency:,} times "
@@ -439,11 +430,6 @@ def analyze_purchase_combinations(self, question):
         
         analysis += f"In total, there are {combination_patterns['total_unique_combinations']:,} unique purchase combinations across {combination_patterns['customers_with_combinations']:,} customers."
         
-        # Add debug info to the analysis
-        if debug_results and debug_results['butter_rice_variations']:
-            analysis += f"\n\nDEBUG INFO: Found {len(debug_results['butter_rice_variations'])} Butter+Rice variations in manual analysis."
-        
-        # Build key findings
         key_findings = []
         if most_common_combo:
             combo_display = most_common_combo[0].replace(',', ' + ').title()
@@ -455,7 +441,6 @@ def analyze_purchase_combinations(self, question):
             f"Average combination size: {combination_patterns['avg_items_per_combination']:.1f} items"
         ])
         
-        # Build relevant statistics
         relevant_stats = {
             "most_common_combination_count": most_common_combo[1] if most_common_combo else 0,
             "total_unique_combinations": combination_patterns['total_unique_combinations'],
@@ -486,21 +471,188 @@ def analyze_purchase_combinations(self, question):
                 "Which combinations have the highest profit margins?"
             ]
         }
+class UniversalMarketBasketAnalyzer:
+    def __init__(self, df, schema_analysis):
+        self.df = df
+        self.schema_analysis = schema_analysis
+        self.transaction_fields = schema_analysis.get('transaction_fields', [])
+        self.transactions = self.prepare_universal_transactions()
+    
+    def prepare_universal_transactions(self):
+        """Prepare transactions from any dataset structure"""
+        transactions = []
+        
+        # If specific transaction fields are identified
+        if self.transaction_fields:
+            for field in self.transaction_fields:
+                if field in self.df.columns:
+                    for idx, row in self.df.iterrows():
+                        if pd.notna(row[field]):
+                            # Split comma-separated values
+                            items = [item.strip() for item in str(row[field]).split(',')]
+                            items = [item for item in items if item and item != '']
+                            if len(items) > 1:
+                                transactions.append(items)
+        else:
+            # Try to detect transactional patterns automatically
+            text_cols = self.df.select_dtypes(include=['object', 'string']).columns
+            
+            for col in text_cols:
+                # Look for comma-separated values
+                has_commas = self.df[col].astype(str).str.contains(',', na=False).sum()
+                if has_commas > len(self.df) * 0.1:  # If >10% have commas
+                    for idx, row in self.df.iterrows():
+                        if pd.notna(row[col]) and ',' in str(row[col]):
+                            items = [item.strip() for item in str(row[col]).split(',')]
+                            items = [item for item in items if item and item != '']
+                            if len(items) > 1:
+                                transactions.append(items)
+                    break  # Use first suitable column
+        
+        return transactions
+    
+    def analyze_patterns(self, min_support=0.1):
+        """Analyze universal patterns"""
+        if not self.transactions:
+            return [], []
+        
+        # Get all unique items
+        all_items = set()
+        for transaction in self.transactions:
+            all_items.update(transaction)
+        
+        all_items = list(all_items)
+        frequent_itemsets = []
+        
+        # Generate frequent itemsets
+        for item in all_items:
+            support = self.calculate_support([item])
+            if support >= min_support:
+                frequent_itemsets.append({
+                    'itemset': [item],
+                    'support': support,
+                    'count': int(support * len(self.transactions))
+                })
+        
+        # Generate 2-itemsets
+        for combo in combinations(all_items, 2):
+            support = self.calculate_support(list(combo))
+            if support >= min_support:
+                frequent_itemsets.append({
+                    'itemset': list(combo),
+                    'support': support,
+                    'count': int(support * len(self.transactions))
+                })
+        
+        # Generate association rules
+        rules = []
+        for itemset_data in frequent_itemsets:
+            if len(itemset_data['itemset']) == 2:
+                itemset = itemset_data['itemset']
+                for i in range(len(itemset)):
+                    antecedent = [itemset[i]]
+                    consequent = [itemset[1-i]]
+                    
+                    antecedent_support = self.calculate_support(antecedent)
+                    if antecedent_support > 0:
+                        confidence = itemset_data['support'] / antecedent_support
+                        consequent_support = self.calculate_support(consequent)
+                        lift = confidence / consequent_support if consequent_support > 0 else 0
+                        
+                        if confidence >= 0.5:
+                            rules.append({
+                                'antecedent': antecedent,
+                                'consequent': consequent,
+                                'support': itemset_data['support'],
+                                'confidence': confidence,
+                                'lift': lift,
+                                'count': itemset_data['count']
+                            })
+        
+        return frequent_itemsets, rules
+    
+    def calculate_support(self, itemset):
+        """Calculate support for itemset"""
+        count = sum(1 for transaction in self.transactions 
+                   if all(item in transaction for item in itemset))
+        return count / len(self.transactions) if self.transactions else 0
+
+def generate_pattern_business_insights(rules, domain, primary_entity):
+    """Generate domain-specific business insights from patterns"""
+    key_findings = []
+    recommendations = []
+    
+    if not rules:
+        return key_findings, recommendations
+    
+    # General findings
+    strongest_rule = max(rules, key=lambda x: x['confidence'])
+    key_findings.append(f"Strongest pattern: {' + '.join(strongest_rule['antecedent'])} → {' + '.join(strongest_rule['consequent'])} ({strongest_rule['confidence']:.1%} confidence)")
+    
+    highest_lift = max(rules, key=lambda x: x['lift'])
+    key_findings.append(f"Most unexpected association: {' + '.join(highest_lift['antecedent'])} → {' + '.join(highest_lift['consequent'])} (Lift: {highest_lift['lift']:.2f})")
+    
+    key_findings.append(f"Total significant patterns identified: {len(rules)}")
+    
+    # Domain-specific recommendations
+    if 'customer' in domain.lower():
+        recommendations.extend([
+            "Use patterns for cross-selling recommendations to customers",
+            "Create bundled product offerings based on associations",
+            "Target marketing campaigns using pattern insights",
+            "Optimize customer experience with predictive suggestions"
+        ])
+    elif 'diving' in domain.lower():
+        recommendations.extend([
+            "Recommend complementary certifications based on diver patterns",
+            "Create specialty course bundles for popular combinations",
+            "Target advanced courses to divers with specific certification patterns",
+            "Use patterns to predict diver progression paths"
+        ])
+    elif 'healthcare' in domain.lower():
+        recommendations.extend([
+            "Identify common treatment combinations for better care protocols",
+            "Use patterns to predict potential complications or comorbidities",
+            "Optimize resource allocation based on treatment associations",
+            "Create preventive care recommendations using pattern insights"
+        ])
+    elif 'education' in domain.lower():
+        recommendations.extend([
+            "Recommend course combinations based on student success patterns",
+            "Create curriculum pathways using popular course associations",
+            "Target support services to students with specific course patterns",
+            "Use patterns to predict student academic outcomes"
+        ])
+    elif 'sales' in domain.lower():
+        recommendations.extend([
+            "Create product bundles based on purchase associations",
+            "Target upselling opportunities using transaction patterns",
+            "Optimize inventory placement based on product associations",
+            "Develop cross-selling strategies from pattern insights"
+        ])
+    else:
+        # Generic business recommendations
+        recommendations.extend([
+            f"Use patterns for {primary_entity} recommendations and suggestions",
+            f"Create bundled offerings based on {primary_entity} associations",
+            f"Target marketing using discovered {primary_entity} patterns",
+            f"Optimize {primary_entity} experience with predictive insights"
+        ])
+    
+    return key_findings, recommendations
+
 class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        # Cache for processed data
+        self.model = genai.GenerativeModel('gemini-2.5-flash-exp')
         self._parsed_fields_cache = {}
     
     def detect_combined_fields(self):
-        """Detect fields that might contain combined/separated data like products, tags, etc."""
         combined_fields = {}
         text_cols = self.df.select_dtypes(include=['object', 'string']).columns
         
         for col in text_cols:
-            # Check if column contains common separators
             sample_values = self.df[col].dropna().head(100).astype(str)
             
             separators_found = []
@@ -510,10 +662,8 @@ class SmartRAGAssistant:
                 if any(sep in str(val) for val in sample_values):
                     separators_found.append(sep)
             
-            # Check if field name suggests it contains multiple items
             field_indicators = ['history', 'products', 'items', 'tags', 'categories', 'skills', 'interests', 'purchase']
             if any(indicator in col.lower() for indicator in field_indicators) or separators_found:
-                # Determine the most likely separator
                 separator_counts = {}
                 for sep in separators_found:
                     count = sum(str(val).count(sep) for val in sample_values)
@@ -529,34 +679,29 @@ class SmartRAGAssistant:
         return combined_fields
     
     def parse_combined_field(self, column_name, separator=','):
-        """Parse a combined field into individual items and return frequency analysis"""
         if column_name in self._parsed_fields_cache:
             return self._parsed_fields_cache[column_name]
         
         if column_name not in self.df.columns:
             return None
         
-        # Extract all individual items
         all_items = []
         for value in self.df[column_name].dropna():
             if pd.isna(value):
                 continue
-            # Split by separator and clean items
             items = [item.strip().lower() for item in str(value).split(separator) if item.strip()]
             all_items.extend(items)
         
         if not all_items:
             return None
         
-        # Count frequency of each item
         from collections import Counter
         item_counts = Counter(all_items)
         
-        # Create analysis
         analysis = {
             'total_individual_items': len(all_items),
             'unique_items': len(item_counts),
-            'most_common': item_counts.most_common(20),  # Top 20 items
+            'most_common': item_counts.most_common(20),
             'item_frequency': dict(item_counts),
             'coverage_stats': {
                 'records_with_data': int(self.df[column_name].count()),
@@ -564,16 +709,13 @@ class SmartRAGAssistant:
             }
         }
         
-        # Cache the result
         self._parsed_fields_cache[column_name] = analysis
         return analysis
     
     def analyze_combination_patterns(self, column_name, separator=','):
-        """Analyze full combination patterns (not individual items)"""
         if column_name not in self.df.columns:
             return None
         
-        # Get all non-null combination strings
         combinations = []
         combination_sizes = []
         
@@ -581,12 +723,9 @@ class SmartRAGAssistant:
             if pd.isna(value) or str(value).strip() == '':
                 continue
             
-            # Clean and normalize the combination string
             clean_combo = str(value).strip()
-            # Sort items in combination for consistent matching
             items = [item.strip().lower() for item in clean_combo.split(separator) if item.strip()]
             if items:
-                # Sort items to treat "A,B" and "B,A" as the same combination
                 sorted_items = sorted(items)
                 normalized_combo = ','.join(sorted_items)
                 combinations.append(normalized_combo)
@@ -595,11 +734,9 @@ class SmartRAGAssistant:
         if not combinations:
             return None
         
-        # Count frequency of each combination
         from collections import Counter
         combo_counts = Counter(combinations)
         
-        # Calculate statistics
         analysis = {
             'total_customers_with_combinations': len(combinations),
             'unique_combinations': len(combo_counts),
@@ -629,14 +766,12 @@ class SmartRAGAssistant:
         return context
     
     def get_combined_fields_analysis(self):
-        """Analyze fields that contain combined data like products, tags, etc."""
         combined_fields = self.detect_combined_fields()
         analysis = {}
         
         for field_name, field_info in combined_fields.items():
             parsed_data = self.parse_combined_field(field_name, field_info['separator'])
             if parsed_data:
-                # Add combination patterns analysis
                 combination_patterns = self.analyze_combination_patterns(field_name, field_info['separator'])
                 
                 analysis[field_name] = {
@@ -728,10 +863,8 @@ class SmartRAGAssistant:
         }
     
     def handle_specific_question_types(self, question):
-        """Handle specific question types that require special processing"""
         question_lower = question.lower()
         
-        # Detect product/item-related questions
         product_keywords = ['product', 'item', 'purchase', 'bought', 'buy', 'sold', 'selling', 'offer', 'provide', 'sell']
         ranking_keywords = ['most', 'popular', 'common', 'frequent', 'top', 'best']
         combination_keywords = ['combination', 'combo', 'together', 'bundle', 'pair', 'group', 'set']
@@ -742,11 +875,9 @@ class SmartRAGAssistant:
         is_combination_question = any(keyword in question_lower for keyword in combination_keywords)
         is_unique_question = any(keyword in question_lower for keyword in unique_keywords)
         
-        # Handle unique products question
         if is_product_question and is_unique_question:
             return self.analyze_unique_products(question)
         
-        # Handle product popularity/ranking questions
         elif is_product_question and is_ranking_question:
             if is_combination_question:
                 return self.analyze_purchase_combinations(question)
@@ -756,7 +887,6 @@ class SmartRAGAssistant:
         return None
     
     def analyze_unique_products(self, question):
-        """Specifically handle questions about unique products/items offered"""
         combined_fields = self.detect_combined_fields()
         
         if not combined_fields:
@@ -778,7 +908,6 @@ class SmartRAGAssistant:
                 ]
             }
         
-        # Find the most likely product field
         product_field = None
         for field_name in combined_fields.keys():
             field_lower = field_name.lower()
@@ -789,7 +918,6 @@ class SmartRAGAssistant:
         if not product_field:
             product_field = list(combined_fields.keys())[0]
         
-        # Parse the field to get individual products
         parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
         
         if not parsed_data or not parsed_data['most_common']:
@@ -804,12 +932,10 @@ class SmartRAGAssistant:
                 "follow_up_questions": ["What does the product data look like in your dataset?"]
             }
         
-        # Build comprehensive analysis
         unique_products = list(parsed_data['item_frequency'].keys())
         total_unique = len(unique_products)
-        top_products = parsed_data['most_common'][:10]  # Top 10 products
+        top_products = parsed_data['most_common'][:10]  
         
-        # Create a formatted list of products
         product_list = [product.title() for product in unique_products]
         top_10_names = [name.title() for name, count in top_products]
         
@@ -821,7 +947,6 @@ class SmartRAGAssistant:
         analysis += f"These products appear across {parsed_data['coverage_stats']['records_with_data']:,} customer purchase records, "
         analysis += f"with an average of {parsed_data['coverage_stats']['average_items_per_record']:.1f} items per customer purchase history."
         
-        # Additional insights about product diversity
         total_purchases = parsed_data['total_individual_items']
         if total_purchases > 0:
             diversity_ratio = (total_unique / total_purchases) * 100
@@ -833,7 +958,6 @@ class SmartRAGAssistant:
             else:
                 analysis += "focused product range with some items being purchased frequently."
         
-        # Build key findings
         key_findings = [
             f"Total unique products offered: {total_unique}",
             f"Most popular product: {top_products[0][0].title()} ({top_products[0][1]:,} purchases)" if top_products else "No purchase data available",
@@ -841,7 +965,6 @@ class SmartRAGAssistant:
             f"Average items per customer: {parsed_data['coverage_stats']['average_items_per_record']:.1f}"
         ]
         
-        # Build relevant statistics
         relevant_stats = {
             "total_unique_products": total_unique,
             "total_purchase_instances": parsed_data['total_individual_items'],
@@ -850,7 +973,6 @@ class SmartRAGAssistant:
             "avg_products_per_customer": parsed_data['coverage_stats']['average_items_per_record']
         }
         
-        # Generate actionable insights
         actionable_insights = [
             "Consider creating product categories to better organize your diverse catalog",
             f"Focus marketing on the top 5 products: {', '.join([name.title() for name, _ in top_products[:5]])}" if len(top_products) >= 5 else "Analyze top products for marketing focus",
@@ -858,7 +980,6 @@ class SmartRAGAssistant:
             "Use purchase patterns to develop product recommendation systems"
         ]
         
-        # Add category-specific insights if applicable
         if total_unique > 50:
             actionable_insights.append("Consider implementing product search and filtering due to large catalog size")
         elif total_unique < 10:
@@ -884,7 +1005,6 @@ class SmartRAGAssistant:
         }
     
     def analyze_product_popularity(self, question):
-        """Specifically handle questions about product popularity/frequency"""
         combined_fields = self.detect_combined_fields()
         
         if not combined_fields:
@@ -906,7 +1026,6 @@ class SmartRAGAssistant:
                 ]
             }
         
-        # Find the most likely product field
         product_field = None
         for field_name in combined_fields.keys():
             field_lower = field_name.lower()
@@ -915,7 +1034,7 @@ class SmartRAGAssistant:
                 break
         
         if not product_field:
-            product_field = list(combined_fields.keys())[0]  # Take the first combined field
+            product_field = list(combined_fields.keys())[0]
         
         # Parse the field
         parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
@@ -932,7 +1051,6 @@ class SmartRAGAssistant:
                 "follow_up_questions": ["What does the product data look like in your dataset?"]
             }
         
-        # Get top products
         top_products = parsed_data['most_common'][:10]
         most_popular_product = top_products[0] if top_products else None
         
@@ -953,7 +1071,6 @@ class SmartRAGAssistant:
         
         analysis += f"In total, there are {parsed_data['unique_items']:,} unique products across {parsed_data['total_individual_items']:,} total purchase instances."
         
-        # Build key findings
         key_findings = []
         if most_popular_product:
             key_findings.append(f"Most popular product: {most_popular_product[0].title()} ({most_popular_product[1]:,} purchases)")
@@ -961,7 +1078,6 @@ class SmartRAGAssistant:
         key_findings.append(f"Total purchase instances: {parsed_data['total_individual_items']:,}")
         key_findings.append(f"Average products per customer: {parsed_data['coverage_stats']['average_items_per_record']:.1f}")
         
-        # Build relevant statistics
         relevant_stats = {
             "most_popular_product_count": most_popular_product[1] if most_popular_product else 0,
             "total_unique_products": parsed_data['unique_items'],
@@ -995,7 +1111,6 @@ class SmartRAGAssistant:
         }
     
     def analyze_purchase_combinations(self, question):
-        """Specifically handle questions about product combinations/bundles"""
         combined_fields = self.detect_combined_fields()
         
         if not combined_fields:
@@ -1016,7 +1131,6 @@ class SmartRAGAssistant:
                 ]
             }
         
-        # Find the most likely product combination field
         combination_field = None
         for field_name in combined_fields.keys():
             field_lower = field_name.lower()
@@ -1027,7 +1141,6 @@ class SmartRAGAssistant:
         if not combination_field:
             combination_field = list(combined_fields.keys())[0]
         
-        # Use the same analysis that's cached in get_combined_fields_analysis
         combined_analysis = self.get_combined_fields_analysis()
         
         if combination_field not in combined_analysis:
@@ -1042,7 +1155,6 @@ class SmartRAGAssistant:
                 "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
             }
         
-        # Get combination data from the consistent analysis
         field_analysis = combined_analysis[combination_field]
         combination_patterns = field_analysis['combination_patterns']
         
@@ -1058,7 +1170,6 @@ class SmartRAGAssistant:
                 "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
             }
         
-        # Get top combinations
         top_combinations = combination_patterns['top_10_combinations']
         most_common_combo = top_combinations[0] if top_combinations else None
         
@@ -1069,7 +1180,6 @@ class SmartRAGAssistant:
             total_records = combination_patterns['customers_with_combinations']
             percentage = (frequency / total_records) * 100 if total_records > 0 else 0
             
-            # Clean up the combination display
             combo_display = combo_pattern.replace(',', ' + ').title()
             
             analysis += f"the most common purchase combination is '{combo_display}' appearing {frequency:,} times "
@@ -1085,7 +1195,6 @@ class SmartRAGAssistant:
         
         analysis += f"In total, there are {combination_patterns['total_unique_combinations']:,} unique purchase combinations across {combination_patterns['customers_with_combinations']:,} customers."
         
-        # Build key findings
         key_findings = []
         if most_common_combo:
             combo_display = most_common_combo[0].replace(',', ' + ').title()
@@ -1097,7 +1206,6 @@ class SmartRAGAssistant:
             f"Average combination size: {combination_patterns['avg_items_per_combination']:.1f} items"
         ])
         
-        # Build relevant statistics
         relevant_stats = {
             "most_common_combination_count": most_common_combo[1] if most_common_combo else 0,
             "total_unique_combinations": combination_patterns['total_unique_combinations'],
@@ -1131,12 +1239,10 @@ class SmartRAGAssistant:
     
     def answer_question(self, question):
         try:
-            # Check if question is asking about individual items in combined fields
             specific_analysis = self.handle_specific_question_types(question)
             if specific_analysis:
                 return specific_analysis
             
-            # Continue with general RAG approach
             data_context = self.create_data_context()
             prompt = self.create_rag_prompt(question, data_context)
             response = self.model.generate_content(prompt)
@@ -1340,6 +1446,363 @@ def format_response_structure(rag_result):
         },
         "actionableInsights": actionable_insights,
         "followUpQuestions": rag_result.get('follow_up_questions', [])
+    }
+def generate_dashboard_insights(df, schema_analysis):
+    """Generate comprehensive dashboard insights using Gemini AI"""
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash-exp')
+        
+        # Create comprehensive data context
+        data_context = create_dashboard_context(df, schema_analysis)
+        
+        # Generate insights using Gemini
+        prompt = create_dashboard_prompt(data_context)
+        response = model.generate_content(prompt)
+        
+        # Parse AI response and combine with calculated metrics
+        ai_insights = parse_dashboard_response(response.text)
+        calculated_metrics = calculate_dashboard_metrics(df, schema_analysis)
+        
+        # Merge AI insights with calculated data
+        dashboard_data = merge_dashboard_data(ai_insights, calculated_metrics, df, schema_analysis)
+        
+        return dashboard_data
+        
+    except Exception as e:
+        print(f"Gemini dashboard generation failed: {str(e)}")
+        # Fallback to rule-based dashboard generation
+        return generate_fallback_dashboard(df, schema_analysis)
+
+def create_dashboard_context(df, schema_analysis):
+    """Create comprehensive context for dashboard generation"""
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    text_cols = df.select_dtypes(include=['object', 'string']).columns
+    
+    # Statistical summary
+    statistical_summary = {}
+    for col in numeric_cols:
+        if not df[col].isna().all():
+            try:
+                statistical_summary[col] = {
+                    "count": int(df[col].count()),
+                    "mean": float(df[col].mean()) if not pd.isna(df[col].mean()) else 0.0,
+                    "std": float(df[col].std()) if not pd.isna(df[col].std()) else 0.0,
+                    "min": float(df[col].min()) if not pd.isna(df[col].min()) else 0.0,
+                    "25%": float(df[col].quantile(0.25)) if not pd.isna(df[col].quantile(0.25)) else 0.0,
+                    "50%": float(df[col].median()) if not pd.isna(df[col].median()) else 0.0,
+                    "75%": float(df[col].quantile(0.75)) if not pd.isna(df[col].quantile(0.75)) else 0.0,
+                    "max": float(df[col].max()) if not pd.isna(df[col].max()) else 0.0,
+                    "sum": float(df[col].sum()) if not pd.isna(df[col].sum()) else 0.0,
+                    "unique_count": int(df[col].nunique())
+                }
+            except Exception as e:
+                print(f"Error processing column {col}: {e}")
+                continue
+    
+    # Categorical insights
+    categorical_insights = {}
+    for col in text_cols:
+        unique_count = df[col].nunique()
+        if 2 <= unique_count <= 50 or (unique_count / len(df) < 0.2 and unique_count > 1):
+            value_counts = df[col].value_counts()
+            categorical_insights[col] = {
+                "unique_count": int(unique_count),
+                "most_common": str(value_counts.index[0]) if len(value_counts) > 0 else None,
+                "most_common_count": int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
+                "top_5_values": {str(k): int(v) for k, v in value_counts.head(5).items()}
+            }
+    
+    # Data quality metrics
+    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    
+    return {
+        "metadata": {
+            "business_domain": schema_analysis.get('business_domain', 'general business'),
+            "primary_entity": schema_analysis.get('primary_entity', 'record'),
+            "total_records": len(df),
+            "total_columns": len(df.columns),
+            "columns": list(df.columns),
+            "data_completeness": completeness
+        },
+        "statistical_summary": statistical_summary,
+        "categorical_insights": categorical_insights,
+        "sample_data": df.head(5).to_dict('records')
+    }
+
+def create_dashboard_prompt(data_context):
+    """Create AI prompt for dashboard insights generation"""
+    return f"""
+You are a Business Intelligence Dashboard Generator. Analyze the provided dataset and generate comprehensive dashboard insights.
+
+BUSINESS CONTEXT:
+- Domain: {data_context['metadata']['business_domain']}
+- Entity: {data_context['metadata']['primary_entity']} 
+- Records: {data_context['metadata']['total_records']:,}
+- Columns: {data_context['metadata']['total_columns']}
+- Data Quality: {data_context['metadata']['data_completeness']:.1f}% complete
+
+STATISTICAL DATA:
+{json.dumps(data_context['statistical_summary'], indent=2)}
+
+CATEGORICAL DATA:
+{json.dumps(data_context['categorical_insights'], indent=2)}
+
+SAMPLE RECORDS:
+{json.dumps(data_context['sample_data'], indent=2)}
+
+Generate business dashboard insights in JSON format:
+
+{{
+    "primaryInsights": [
+        "Key insight about business domain and data patterns",
+        "Data quality and completeness insight", 
+        "Business value and opportunity insight",
+        "Domain-specific trend or pattern insight"
+    ],
+    "actionableInsights": [
+        "Specific actionable recommendation based on data",
+        "Strategy suggestion for business improvement",
+        "Data-driven decision making recommendation"
+    ],
+    "nextSteps": [
+        "Immediate action item based on findings",
+        "Long-term strategic recommendation",
+        "Data analysis or collection suggestion"
+    ]
+}}
+
+Focus on:
+1. Business domain-specific insights (not just generic data observations)
+2. Actionable recommendations that can drive business value
+3. Specific patterns or trends visible in the actual data
+4. Data quality insights that impact business decisions
+
+Be specific and avoid generic statements. Use actual data values and percentages where relevant.
+"""
+
+def parse_dashboard_response(response_text):
+    """Parse Gemini response for dashboard insights"""
+    try:
+        clean_response = response_text.strip()
+        if clean_response.startswith('```json'):
+            clean_response = clean_response[7:-3]
+        elif clean_response.startswith('```'):
+            clean_response = clean_response[3:-3]
+        
+        return json.loads(clean_response)
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse AI response: {e}")
+        return None
+
+def calculate_dashboard_metrics(df, schema_analysis):
+    """Calculate key performance metrics for dashboard"""
+    metrics = []
+    entity = schema_analysis.get('primary_entity', 'record')
+    
+    # Primary metric: Total records
+    metrics.append({
+        "number": len(df),
+        "title": f"Total {entity.title()}s",
+        "description": f"Total number of {entity}s in the dataset"
+    })
+    
+    # Data completeness metric
+    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    metrics.append({
+        "number": round(completeness, 1),
+        "title": "Data Completeness",
+        "description": "Percentage of non-missing data across all fields"
+    })
+    
+    # Numeric metrics
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols[:3]:  # Top 3 numeric columns
+        if df[col].sum() > 0:
+            total_value = df[col].sum()
+            avg_value = df[col].mean()
+            
+            metrics.append({
+                "number": int(total_value) if total_value == int(total_value) else round(total_value, 2),
+                "title": f"Total {col.replace('_', ' ').title()}",
+                "description": f"Sum of all {col.lower()} values"
+            })
+            
+            if avg_value != total_value and len(metrics) < 6:
+                metrics.append({
+                    "number": round(avg_value, 2),
+                    "title": f"Average {col.replace('_', ' ').title()}",
+                    "description": f"Average {col.lower()} per {entity}"
+                })
+    
+    # Categorical diversity metrics
+    categorical_fields = schema_analysis.get('categorical_fields', [])
+    for cat_field in categorical_fields[:2]:  # Top 2 categorical fields
+        if len(metrics) < 6:
+            unique_count = df[cat_field['column']].nunique()
+            metrics.append({
+                "number": unique_count,
+                "title": f"Unique {cat_field['column'].replace('_', ' ').title()}",
+                "description": f"Number of distinct {cat_field['column'].lower()} categories"
+            })
+    
+    return metrics[:6]  # Limit to 6 metrics
+
+def generate_quick_stats(df, schema_analysis):
+    """Generate quick statistics for dashboard"""
+    stats = []
+    
+    stats.append({
+        "key": "Business Domain",
+        "value": schema_analysis.get('business_domain', 'general business').title()
+    })
+    
+    stats.append({
+        "key": "Primary Entity", 
+        "value": schema_analysis.get('primary_entity', 'record').title()
+    })
+    
+    stats.append({
+        "key": "Total Records",
+        "value": f"{len(df):,}"
+    })
+    
+    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    stats.append({
+        "key": "Data Completeness",
+        "value": f"{completeness:.1f}%"
+    })
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) > 0:
+        for col in numeric_cols[:2]:
+            if df[col].sum() > 0:
+                total = df[col].sum()
+                if total > 1000:
+                    stats.append({
+                        "key": f"Total {col.replace('_', ' ').title()}",
+                        "value": f"{total:,.0f}"
+                    })
+                else:
+                    stats.append({
+                        "key": f"Total {col.replace('_', ' ').title()}",
+                        "value": f"{total:.1f}"
+                    })
+                break
+    
+    return stats[:5]  
+
+def generate_analytics_summary(df):
+    """Generate analytics summary for numeric columns"""
+    analytics = []
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    for col in numeric_cols:
+        if not df[col].isna().all():
+            try:
+                analytics.append({
+                    "name": col,
+                    "count": int(df[col].count()),
+                    "mean": round(float(df[col].mean()), 2) if not pd.isna(df[col].mean()) else 0.0,
+                    "std": round(float(df[col].std()), 2) if not pd.isna(df[col].std()) else 0.0,
+                    "min": round(float(df[col].min()), 2) if not pd.isna(df[col].min()) else 0.0,
+                    "25%": round(float(df[col].quantile(0.25)), 2) if not pd.isna(df[col].quantile(0.25)) else 0.0,
+                    "50%": round(float(df[col].median()), 2) if not pd.isna(df[col].median()) else 0.0,
+                    "75%": round(float(df[col].quantile(0.75)), 2) if not pd.isna(df[col].quantile(0.75)) else 0.0,
+                    "max": round(float(df[col].max()), 2) if not pd.isna(df[col].max()) else 0.0
+                })
+            except Exception as e:
+                print(f"Error processing analytics for column {col}: {e}")
+                continue
+    
+    return analytics
+
+def merge_dashboard_data(ai_insights, calculated_metrics, df, schema_analysis):
+    
+    if not ai_insights:
+        ai_insights = generate_fallback_insights(df, schema_analysis)
+    
+    return {
+        "keyBusinessInsights": {
+            "primaryInsights": ai_insights.get("primaryInsights", []),
+            "quickStats": generate_quick_stats(df, schema_analysis)
+        },
+        "keyPerformanceMetrics": calculated_metrics,
+        "businessRecommendations": {
+            "actionableInsights": ai_insights.get("actionableInsights", []),
+            "nextSteps": ai_insights.get("nextSteps", [])
+        },
+        "analytics": generate_analytics_summary(df)
+    }
+
+def generate_fallback_dashboard(df, schema_analysis):
+    return generate_fallback_insights_full(df, schema_analysis)
+
+def generate_fallback_insights(df, schema_analysis):
+    domain = schema_analysis.get('business_domain', 'general business')
+    entity = schema_analysis.get('primary_entity', 'record')
+    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    
+    primary_insights = [
+        f"Dataset contains {len(df):,} {entity} records from {domain} domain",
+        f"Data quality is {'excellent' if completeness > 95 else 'good' if completeness > 80 else 'fair'} with {completeness:.1f}% completeness"
+    ]
+    
+    if 'customer' in domain.lower():
+        primary_insights.append("Customer relationship data detected - suitable for segmentation and retention analysis")
+    elif 'sales' in domain.lower():
+        primary_insights.append("Sales data structure identified - ready for revenue and performance analysis")
+    elif 'healthcare' in domain.lower():
+        primary_insights.append("Healthcare data patterns found - appropriate for patient outcome analysis")
+    elif 'education' in domain.lower():
+        primary_insights.append("Educational data detected - suitable for student performance tracking")
+    else:
+        primary_insights.append(f"Business data structure optimized for {entity} analysis and reporting")
+    
+    numeric_cols = len(df.select_dtypes(include=[np.number]).columns)
+    if numeric_cols > 0:
+        primary_insights.append(f"Contains {numeric_cols} quantitative fields suitable for statistical analysis")
+    
+    actionable_insights = [
+        f"Implement {entity} segmentation based on key categorical fields",
+        "Set up automated data quality monitoring for missing value detection",
+        "Develop KPI tracking dashboard for key business metrics"
+    ]
+    
+    if 'customer' in domain.lower():
+        actionable_insights.append("Create customer lifetime value models and churn prediction analytics")
+    elif 'sales' in domain.lower():
+        actionable_insights.append("Establish sales forecasting and territory performance optimization")
+    elif 'inventory' in domain.lower():
+        actionable_insights.append("Implement inventory optimization and demand forecasting systems")
+    
+    next_steps = [
+        "Set up regular data validation and quality checks",
+        "Create automated reporting dashboards for key stakeholders",
+        "Implement data-driven decision making processes"
+    ]
+    
+    return {
+        "primaryInsights": primary_insights[:4],
+        "actionableInsights": actionable_insights[:3],
+        "nextSteps": next_steps[:3]
+    }
+
+def generate_fallback_insights_full(df, schema_analysis):
+    """Generate complete fallback dashboard when AI is unavailable"""
+    insights = generate_fallback_insights(df, schema_analysis)
+    metrics = calculate_dashboard_metrics(df, schema_analysis)
+    
+    return {
+        "keyBusinessInsights": {
+            "primaryInsights": insights["primaryInsights"],
+            "quickStats": generate_quick_stats(df, schema_analysis)
+        },
+        "keyPerformanceMetrics": metrics,
+        "businessRecommendations": {
+            "actionableInsights": insights["actionableInsights"],
+            "nextSteps": insights["nextSteps"]
+        },
+        "analytics": generate_analytics_summary(df)
     }
 @app.route('/ai/upload', methods=['POST'])
 def upload():
@@ -1575,12 +2038,549 @@ def question_answer():
             "status": "error",
             "message": f"Unexpected error: {str(e)}"
         }), 500
+@app.route('/ai/dashboard-data', methods=['POST'])
+def dashboard_data():
+    try:
+        if 'data' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file part in the request"
+            }), 400
+
+        data_file = request.files['data']
+        if data_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+
+        encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
+        delimiters = [",", ";"]
+
+        df = None
+        for encoding in encodings:
+            for delimiter in delimiters:
+                data_file.stream.seek(0)
+                try:
+                    df = pd.read_csv(
+                        data_file,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        on_bad_lines="skip"
+                    )
+                    print(f"Successfully read CSV with encoding={encoding}, delimiter='{delimiter}'")
+                    break
+                except Exception as e:
+                    print(f"Failed with encoding={encoding}, delimiter='{delimiter}':", e)
+            if df is not None:
+                break
+
+        if df is None:
+            return jsonify({
+                "status": "error",
+                "message": "Could not parse CSV with any tried encoding/delimiter"
+            }), 400
+
+        if df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Converted DataFrame is empty"
+            }), 400
+
+        if len(df.columns) == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No columns found in data"
+            }), 400
+
+        schema_analyzer = DataSchemaAnalyzer(df)
+        schema_analysis = schema_analyzer.analyze_schema()
+        
+        dashboard_insights = generate_dashboard_insights(df, schema_analysis)
+        
+        return jsonify(dashboard_insights), 200
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }), 500
+@app.route('/ai/pattern-analysis-initial', methods=['POST'])
+def pattern_analysis_initial():
+    try:
+        if 'data' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file part in the request"
+            }), 400
+
+        data_file = request.files['data']
+        if data_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+
+        # Parse CSV file
+        encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
+        delimiters = [",", ";"]
+
+        df = None
+        for encoding in encodings:
+            for delimiter in delimiters:
+                data_file.stream.seek(0)
+                try:
+                    df = pd.read_csv(
+                        data_file,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        on_bad_lines="skip"
+                    )
+                    print(f"Successfully read CSV with encoding={encoding}, delimiter='{delimiter}'")
+                    break
+                except Exception as e:
+                    print(f"Failed with encoding={encoding}, delimiter='{delimiter}':", e)
+            if df is not None:
+                break
+
+        if df is None:
+            return jsonify({
+                "status": "error",
+                "message": "Could not parse CSV with any tried encoding/delimiter"
+            }), 400
+
+        if df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Converted DataFrame is empty"
+            }), 400
+
+        if len(df.columns) == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No columns found in data"
+            }), 400
+
+        # Analyze schema
+        schema_analyzer = DataSchemaAnalyzer(df)
+        schema_analysis = schema_analyzer.analyze_schema()
+
+        # Initialize pattern analyzer
+        pattern_analyzer = UniversalMarketBasketAnalyzer(df, schema_analysis)
+        
+        # Calculate initial metrics
+        transactions_found = len(pattern_analyzer.transactions)
+        transactional_patterns_detected = transactions_found > 0
+        
+        avg_items_per_transaction = 0
+        if transactions_found > 0:
+            avg_items_per_transaction = np.mean([len(t) for t in pattern_analyzer.transactions])
+
+        response_data = {
+            "transactionalPatternsDetected": transactional_patterns_detected,
+            "data": {
+                "transactionsFound": transactions_found,
+                "avgItemsPerTransaction": round(avg_items_per_transaction, 1)
+            }
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }), 500
+
+@app.route('/ai/pattern-analysis-analyze', methods=['POST'])
+def pattern_analysis_analyze():
+    try:
+        if 'data' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file part in the request"
+            }), 400
+
+        data_file = request.files['data']
+        if data_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+
+        # Get min_support from form data (default to 0.1)
+        min_support = float(request.form.get('min_support', 0.1))
+
+        # Parse CSV file
+        encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
+        delimiters = [",", ";"]
+
+        df = None
+        for encoding in encodings:
+            for delimiter in delimiters:
+                data_file.stream.seek(0)
+                try:
+                    df = pd.read_csv(
+                        data_file,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        on_bad_lines="skip"
+                    )
+                    print(f"Successfully read CSV with encoding={encoding}, delimiter='{delimiter}'")
+                    break
+                except Exception as e:
+                    print(f"Failed with encoding={encoding}, delimiter='{delimiter}':", e)
+            if df is not None:
+                break
+
+        if df is None:
+            return jsonify({
+                "status": "error",
+                "message": "Could not parse CSV with any tried encoding/delimiter"
+            }), 400
+
+        if df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Converted DataFrame is empty"
+            }), 400
+
+        if len(df.columns) == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No columns found in data"
+            }), 400
+
+        # Analyze schema
+        schema_analyzer = DataSchemaAnalyzer(df)
+        schema_analysis = schema_analyzer.analyze_schema()
+
+        # Initialize pattern analyzer
+        pattern_analyzer = UniversalMarketBasketAnalyzer(df, schema_analysis)
+        
+        # Check if patterns can be analyzed
+        if not pattern_analyzer.transactions:
+            return jsonify({
+                "foundPatterns": False,
+                "issueIfNoPatternsFound": "No suitable transactional patterns detected in this dataset. Pattern Analysis works best with data that has comma-separated values in text fields, multiple items per record, or categorical associations.",
+                "data": {
+                    "significantPatternsCount": 0,
+                    "topAssociationPatterns": [],
+                    "businessInsights": {
+                        "keyFindings": ["No transactional data patterns found in the dataset"],
+                        "recommendations": [
+                            "Ensure data contains comma-separated values or multiple items per record",
+                            "Check for fields with categorical associations",
+                            "Consider restructuring data to include transactional relationships"
+                        ]
+                    }
+                }
+            }), 200
+
+        # Analyze patterns
+        frequent_itemsets, association_rules = pattern_analyzer.analyze_patterns(min_support)
+        
+        if not association_rules:
+            issue_message = f"No significant patterns found with minimum support of {min_support*100:.0f}%. Try lowering the minimum support threshold or ensure your data contains meaningful associations."
+            
+            return jsonify({
+                "foundPatterns": False,
+                "issueIfNoPatternsFound": issue_message,
+                "data": {
+                    "significantPatternsCount": 0,
+                    "topAssociationPatterns": [],
+                    "businessInsights": {
+                        "keyFindings": [
+                            f"Analyzed {len(pattern_analyzer.transactions)} transactional patterns",
+                            f"No patterns met the {min_support*100:.0f}% minimum support threshold"
+                        ],
+                        "recommendations": [
+                            "Lower the minimum support threshold to discover weaker patterns",
+                            "Examine data quality and ensure meaningful associations exist",
+                            "Consider different data preprocessing approaches"
+                        ]
+                    }
+                }
+            }), 200
+
+        # Sort rules by confidence (descending)
+        association_rules.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Format top association patterns
+        top_association_patterns = []
+        for rule in association_rules[:10]:  # Top 10 patterns
+            top_association_patterns.append({
+                "whenWeSee": " + ".join(rule['antecedent']),
+                "weOftenFind": " + ".join(rule['consequent']),
+                "confidence": round(rule['confidence'], 3),
+                "lift": round(rule['lift'], 2)
+            })
+
+        # Generate business insights
+        domain = schema_analysis.get('business_domain', 'general business')
+        primary_entity = schema_analysis.get('primary_entity', 'record')
+        key_findings, recommendations = generate_pattern_business_insights(association_rules, domain, primary_entity)
+
+        response_data = {
+            "foundPatterns": True,
+            "issueIfNoPatternsFound": "",
+            "data": {
+                "significantPatternsCount": len(association_rules),
+                "topAssociationPatterns": top_association_patterns,
+                "businessInsights": {
+                    "keyFindings": key_findings,
+                    "recommendations": recommendations
+                }
+            }
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }), 500
+@app.route('/ai/pattern-analysis-initial', methods=['POST'])
+def pattern_analysis_initial():
+    try:
+        if 'data' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file part in the request"
+            }), 400
+
+        data_file = request.files['data']
+        if data_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+
+        # Parse CSV file
+        encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
+        delimiters = [",", ";"]
+
+        df = None
+        for encoding in encodings:
+            for delimiter in delimiters:
+                data_file.stream.seek(0)
+                try:
+                    df = pd.read_csv(
+                        data_file,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        on_bad_lines="skip"
+                    )
+                    print(f"Successfully read CSV with encoding={encoding}, delimiter='{delimiter}'")
+                    break
+                except Exception as e:
+                    print(f"Failed with encoding={encoding}, delimiter='{delimiter}':", e)
+            if df is not None:
+                break
+
+        if df is None:
+            return jsonify({
+                "status": "error",
+                "message": "Could not parse CSV with any tried encoding/delimiter"
+            }), 400
+
+        if df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Converted DataFrame is empty"
+            }), 400
+
+        if len(df.columns) == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No columns found in data"
+            }), 400
+
+        # Analyze schema
+        schema_analyzer = DataSchemaAnalyzer(df)
+        schema_analysis = schema_analyzer.analyze_schema()
+
+        # Initialize pattern analyzer
+        pattern_analyzer = UniversalMarketBasketAnalyzer(df, schema_analysis)
+        
+        # Calculate initial metrics
+        transactions_found = len(pattern_analyzer.transactions)
+        transactional_patterns_detected = transactions_found > 0
+        
+        avg_items_per_transaction = 0
+        if transactions_found > 0:
+            avg_items_per_transaction = np.mean([len(t) for t in pattern_analyzer.transactions])
+
+        response_data = {
+            "transactionalPatternsDetected": transactional_patterns_detected,
+            "data": {
+                "transactionsFound": transactions_found,
+                "avgItemsPerTransaction": round(avg_items_per_transaction, 1)
+            }
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }), 500
+
+@app.route('/ai/pattern-analysis-analyze', methods=['POST'])
+def pattern_analysis_analyze():
+    try:
+        if 'data' not in request.files:
+            return jsonify({
+                "status": "error",
+                "message": "No file part in the request"
+            }), 400
+
+        data_file = request.files['data']
+        if data_file.filename == '':
+            return jsonify({
+                "status": "error",
+                "message": "No file selected"
+            }), 400
+
+        # Get min_support from form data (default to 0.1)
+        min_support = float(request.form.get('min_support', 0.1))
+
+        # Parse CSV file
+        encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
+        delimiters = [",", ";"]
+
+        df = None
+        for encoding in encodings:
+            for delimiter in delimiters:
+                data_file.stream.seek(0)
+                try:
+                    df = pd.read_csv(
+                        data_file,
+                        encoding=encoding,
+                        delimiter=delimiter,
+                        on_bad_lines="skip"
+                    )
+                    print(f"Successfully read CSV with encoding={encoding}, delimiter='{delimiter}'")
+                    break
+                except Exception as e:
+                    print(f"Failed with encoding={encoding}, delimiter='{delimiter}':", e)
+            if df is not None:
+                break
+
+        if df is None:
+            return jsonify({
+                "status": "error",
+                "message": "Could not parse CSV with any tried encoding/delimiter"
+            }), 400
+
+        if df.empty:
+            return jsonify({
+                "status": "error",
+                "message": "Converted DataFrame is empty"
+            }), 400
+
+        if len(df.columns) == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No columns found in data"
+            }), 400
+
+        # Analyze schema
+        schema_analyzer = DataSchemaAnalyzer(df)
+        schema_analysis = schema_analyzer.analyze_schema()
+
+        # Initialize pattern analyzer
+        pattern_analyzer = UniversalMarketBasketAnalyzer(df, schema_analysis)
+        
+        # Check if patterns can be analyzed
+        if not pattern_analyzer.transactions:
+            return jsonify({
+                "foundPatterns": False,
+                "issueIfNoPatternsFound": "No suitable transactional patterns detected in this dataset. Pattern Analysis works best with data that has comma-separated values in text fields, multiple items per record, or categorical associations.",
+                "data": {
+                    "significantPatternsCount": 0,
+                    "topAssociationPatterns": [],
+                    "businessInsights": {
+                        "keyFindings": ["No transactional data patterns found in the dataset"],
+                        "recommendations": [
+                            "Ensure data contains comma-separated values or multiple items per record",
+                            "Check for fields with categorical associations",
+                            "Consider restructuring data to include transactional relationships"
+                        ]
+                    }
+                }
+            }), 200
+
+        # Analyze patterns
+        frequent_itemsets, association_rules = pattern_analyzer.analyze_patterns(min_support)
+        
+        if not association_rules:
+            issue_message = f"No significant patterns found with minimum support of {min_support*100:.0f}%. Try lowering the minimum support threshold or ensure your data contains meaningful associations."
+            
+            return jsonify({
+                "foundPatterns": False,
+                "issueIfNoPatternsFound": issue_message,
+                "data": {
+                    "significantPatternsCount": 0,
+                    "topAssociationPatterns": [],
+                    "businessInsights": {
+                        "keyFindings": [
+                            f"Analyzed {len(pattern_analyzer.transactions)} transactional patterns",
+                            f"No patterns met the {min_support*100:.0f}% minimum support threshold"
+                        ],
+                        "recommendations": [
+                            "Lower the minimum support threshold to discover weaker patterns",
+                            "Examine data quality and ensure meaningful associations exist",
+                            "Consider different data preprocessing approaches"
+                        ]
+                    }
+                }
+            }), 200
+
+        # Sort rules by confidence (descending)
+        association_rules.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Format top association patterns
+        top_association_patterns = []
+        for rule in association_rules[:10]:  # Top 10 patterns
+            top_association_patterns.append({
+                "whenWeSee": " + ".join(rule['antecedent']),
+                "weOftenFind": " + ".join(rule['consequent']),
+                "confidence": round(rule['confidence'], 3),
+                "lift": round(rule['lift'], 2)
+            })
+
+        # Generate business insights
+        domain = schema_analysis.get('business_domain', 'general business')
+        primary_entity = schema_analysis.get('primary_entity', 'record')
+        key_findings, recommendations = generate_pattern_business_insights(association_rules, domain, primary_entity)
+
+        response_data = {
+            "foundPatterns": True,
+            "issueIfNoPatternsFound": "",
+            "data": {
+                "significantPatternsCount": len(association_rules),
+                "topAssociationPatterns": top_association_patterns,
+                "businessInsights": {
+                    "keyFindings": key_findings,
+                    "recommendations": recommendations
+                }
+            }
+        }
+
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
-
-
-
-
-
-
-
