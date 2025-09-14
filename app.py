@@ -566,7 +566,166 @@ class SmartRAGAssistant:
         
         return None
     
-    def analyze_product_popularity(self, question):
+    def analyze_purchase_combinations(self, question):
+        """Specifically handle questions about product combinations/bundles"""
+        combined_fields = self.detect_combined_fields()
+        
+        if not combined_fields:
+            return {
+                "analysis": "I couldn't find any fields that contain product combination data. The dataset might have product information, but it's not in a format that can be analyzed for purchase combinations.",
+                "confidence": 0.3,
+                "key_findings": ["No parseable combination fields detected"],
+                "relevant_statistics": {},
+                "actionable_insights": [
+                    "Check if purchase data is stored in individual columns",
+                    "Verify the format of purchase-related fields"
+                ],
+                "data_evidence": ["Analyzed field structures for combination patterns"],
+                "confidence_level": "low",
+                "follow_up_questions": [
+                    "What format is the purchase combination data stored in?",
+                    "Are there specific combination columns I should focus on?"
+                ]
+            }
+        
+        # Find the most likely product combination field
+        combination_field = None
+        for field_name in combined_fields.keys():
+            field_lower = field_name.lower()
+            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order', 'history']):
+                combination_field = field_name
+                break
+        
+        if not combination_field:
+            combination_field = list(combined_fields.keys())[0]
+        
+        # Analyze combinations (full strings, not individual items)
+        combination_analysis = self.analyze_combination_patterns(combination_field, combined_fields[combination_field]['separator'])
+        
+        if not combination_analysis or not combination_analysis['most_common_combinations']:
+            return {
+                "analysis": f"I found a potential combination field '{combination_field}' but couldn't extract meaningful combination data from it.",
+                "confidence": 0.2,
+                "key_findings": ["Combination field found but no patterns extracted"],
+                "relevant_statistics": {},
+                "actionable_insights": ["Check the data format in the combination field"],
+                "data_evidence": [f"Attempted to parse field: {combination_field}"],
+                "confidence_level": "low",
+                "follow_up_questions": ["What do the purchase combinations look like in your dataset?"]
+            }
+        
+        # Get top combinations
+        top_combinations = combination_analysis['most_common_combinations'][:10]
+        most_common_combo = top_combinations[0] if top_combinations else None
+        
+        analysis = f"Based on analysis of the '{combination_field}' field, "
+        
+        if most_common_combo:
+            combo_pattern, frequency = most_common_combo
+            total_records = combination_analysis['total_customers_with_combinations']
+            percentage = (frequency / total_records) * 100 if total_records > 0 else 0
+            
+            # Clean up the combination display
+            combo_display = combo_pattern.replace(',', ' + ').title()
+            
+            analysis += f"the most common purchase combination is '{combo_display}' appearing {frequency:,} times "
+            analysis += f"({percentage:.1f}% of customers with purchase data). "
+            
+            if len(top_combinations) > 1:
+                analysis += f"The top 5 most popular combinations are: "
+                top_5_display = []
+                for combo, count in top_combinations[:5]:
+                    clean_combo = combo.replace(',', ' + ').title()
+                    top_5_display.append(f"{clean_combo} ({count:,} times)")
+                analysis += "; ".join(top_5_display) + ". "
+        
+        analysis += f"In total, there are {combination_analysis['unique_combinations']:,} unique purchase combinations across {combination_analysis['total_customers_with_combinations']:,} customers."
+        
+        # Build key findings
+        key_findings = []
+        if most_common_combo:
+            combo_display = most_common_combo[0].replace(',', ' + ').title()
+            key_findings.append(f"Most common combination: {combo_display} ({most_common_combo[1]:,} occurrences)")
+        
+        key_findings.extend([
+            f"Total unique combinations: {combination_analysis['unique_combinations']:,}",
+            f"Customers with combination data: {combination_analysis['total_customers_with_combinations']:,}",
+            f"Average combination size: {combination_analysis['avg_items_per_combination']:.1f} items"
+        ])
+        
+        # Build relevant statistics
+        relevant_stats = {
+            "most_common_combination_count": most_common_combo[1] if most_common_combo else 0,
+            "total_unique_combinations": combination_analysis['unique_combinations'],
+            "customers_with_combinations": combination_analysis['total_customers_with_combinations'],
+            "avg_items_per_combination": combination_analysis['avg_items_per_combination']
+        }
+        
+        return {
+            "analysis": analysis,
+            "confidence": 0.9,
+            "key_findings": key_findings,
+            "relevant_statistics": relevant_stats,
+            "actionable_insights": [
+                f"Create targeted bundles based on the '{most_common_combo[0].replace(',', ' + ').title()}' combination" if most_common_combo else "Analyze combination patterns for bundling opportunities",
+                "Develop cross-selling strategies based on popular combinations",
+                "Consider promotional pricing for frequent combinations",
+                "Analyze seasonal trends in popular combinations"
+            ],
+            "data_evidence": [
+                f"Analyzed {combination_analysis['total_customers_with_combinations']:,} customer purchase combinations",
+                f"Identified {combination_analysis['unique_combinations']:,} unique combination patterns",
+                f"Parsed combinations from '{combination_field}' field"
+            ],
+            "confidence_level": "high",
+            "follow_up_questions": [
+                "What customer segments prefer which combinations?",
+                "How do combination preferences change over time?",
+                "Which combinations have the highest profit margins?"
+            ]
+        }
+    
+    def analyze_combination_patterns(self, column_name, separator=','):
+        """Analyze full combination patterns (not individual items)"""
+        if column_name not in self.df.columns:
+            return None
+        
+        # Get all non-null combination strings
+        combinations = []
+        combination_sizes = []
+        
+        for value in self.df[column_name].dropna():
+            if pd.isna(value) or str(value).strip() == '':
+                continue
+            
+            # Clean and normalize the combination string
+            clean_combo = str(value).strip()
+            # Sort items in combination for consistent matching
+            items = [item.strip().lower() for item in clean_combo.split(separator) if item.strip()]
+            if items:
+                # Sort items to treat "A,B" and "B,A" as the same combination
+                sorted_items = sorted(items)
+                normalized_combo = ','.join(sorted_items)
+                combinations.append(normalized_combo)
+                combination_sizes.append(len(items))
+        
+        if not combinations:
+            return None
+        
+        # Count frequency of each combination
+        from collections import Counter
+        combo_counts = Counter(combinations)
+        
+        # Calculate statistics
+        analysis = {
+            'total_customers_with_combinations': len(combinations),
+            'unique_combinations': len(combo_counts),
+            'most_common_combinations': combo_counts.most_common(20),
+            'avg_items_per_combination': sum(combination_sizes) / len(combination_sizes) if combination_sizes else 0,
+            'combination_size_distribution': Counter(combination_sizes)
+        }
+        
+        return analysis
         """Specifically handle questions about product popularity/frequency"""
         combined_fields = self.detect_combined_fields()
         
@@ -1100,4 +1259,5 @@ def question_answer():
         }), 500
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
 
