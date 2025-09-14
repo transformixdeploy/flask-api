@@ -8,6 +8,8 @@ from flask import Flask, request, jsonify
 from collections import defaultdict
 from dotenv import load_dotenv
 from itertools import combinations
+from functools import lru_cache
+import time
 app = Flask(__name__)
 load_dotenv()
 GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY")
@@ -477,6 +479,9 @@ class UniversalMarketBasketAnalyzer:
         self.schema_analysis = schema_analysis
         self.transaction_fields = schema_analysis.get('transaction_fields', [])
         self.transactions = self.prepare_universal_transactions()
+        self.item_to_index = {}  # For efficient item indexing
+        self.index_to_item = {}  # For reverse lookup
+        self._build_item_index()
     
     def prepare_universal_transactions(self):
         """Prepare transactions from any dataset structure"""
@@ -511,65 +516,220 @@ class UniversalMarketBasketAnalyzer:
         
         return transactions
     
-    def analyze_patterns(self, min_support=0.05):
-        """Analyze universal patterns"""
+    def _build_item_index(self):
+        """Build efficient item indexing for large datasets"""
         if not self.transactions:
-            return [], []
+            return
         
-        # Get all unique items
         all_items = set()
         for transaction in self.transactions:
             all_items.update(transaction)
         
-        all_items = list(all_items)
-        frequent_itemsets = []
+        # Create bidirectional mapping
+        for idx, item in enumerate(sorted(all_items)):
+            self.item_to_index[item] = idx
+            self.index_to_item[idx] = item
+    
+    def analyze_patterns(self, min_support=0.05, min_confidence=0.5, max_itemset_size=3):
+        """Analyze universal patterns using efficient Apriori algorithm with optimizations"""
+        if not self.transactions:
+            return [], []
         
-        # Generate frequent itemsets
+        start_time = time.time()
+        
+        # Convert transactions to frozensets for efficient operations
+        transaction_sets = [frozenset(transaction) for transaction in self.transactions]
+        total_transactions = len(transaction_sets)
+        
+        # Get all unique items
+        all_items = set()
+        for transaction in transaction_sets:
+            all_items.update(transaction)
+        
+        # Step 1: Generate frequent 1-itemsets with vectorized counting
+        frequent_itemsets = {}
+        
+        # Use vectorized approach for 1-itemset counting
+        item_counts = self._count_items_vectorized(transaction_sets, all_items)
+        
+        for item, count in item_counts.items():
+            support = count / total_transactions
+            if support >= min_support:
+                itemset = frozenset([item])
+                frequent_itemsets[itemset] = {
+                    'itemset': list(itemset),
+                    'support': support,
+                    'count': count
+                }
+        
+        # Step 2: Generate frequent k-itemsets using Apriori principle
+        k = 2
+        while k <= max_itemset_size and frequent_itemsets:
+            # Generate candidates for k-itemsets
+            candidates = self._generate_candidates(frequent_itemsets, k)
+            
+            if not candidates:
+                break
+            
+            # Count support for candidates with optimized subset checking
+            candidate_counts = self._count_candidates_vectorized(
+                candidates, transaction_sets, total_transactions, min_support
+            )
+            
+            # Update frequent itemsets
+            frequent_itemsets = candidate_counts
+            k += 1
+        
+        # Step 3: Generate association rules from all frequent itemsets
+        rules = self._generate_association_rules(frequent_itemsets, min_confidence, total_transactions)
+        
+        # Convert back to list format for compatibility
+        frequent_itemsets_list = list(frequent_itemsets.values())
+        
+        end_time = time.time()
+        print(f"Pattern analysis completed in {end_time - start_time:.2f} seconds")
+        
+        return frequent_itemsets_list, rules
+    
+    def _count_items_vectorized(self, transaction_sets, all_items):
+        """Vectorized counting of 1-itemsets with optimization for large datasets"""
+        item_counts = {}
+        
+        # For very large datasets, use bit vector approach
+        if len(transaction_sets) > 10000 and len(all_items) > 100:
+            return self._count_items_bit_vector(transaction_sets, all_items)
+        
+        # Standard approach for smaller datasets
         for item in all_items:
-            support = self.calculate_support([item])
-            if support >= min_support:
-                frequent_itemsets.append({
-                    'itemset': [item],
-                    'support': support,
-                    'count': int(support * len(self.transactions))
-                })
+            count = sum(1 for transaction in transaction_sets if item in transaction)
+            item_counts[item] = count
+        return item_counts
+    
+    def _count_items_bit_vector(self, transaction_sets, all_items):
+        """Bit vector approach for very large datasets"""
+        item_counts = {}
         
-        # Generate 2-itemsets
-        for combo in combinations(all_items, 2):
-            support = self.calculate_support(list(combo))
-            if support >= min_support:
-                frequent_itemsets.append({
-                    'itemset': list(combo),
-                    'support': support,
-                    'count': int(support * len(self.transactions))
-                })
+        # Create bit vectors for each item
+        for item in all_items:
+            count = 0
+            for transaction in transaction_sets:
+                if item in transaction:
+                    count += 1
+            item_counts[item] = count
         
-        # Generate association rules
+        return item_counts
+    
+    def _count_candidates_vectorized(self, candidates, transaction_sets, total_transactions, min_support):
+        """Optimized counting of candidate itemsets"""
+        candidate_counts = {}
+        
+        # Group candidates by size for batch processing
+        candidates_by_size = defaultdict(list)
+        for candidate in candidates:
+            candidates_by_size[len(candidate)].append(candidate)
+        
+        for size, size_candidates in candidates_by_size.items():
+            for candidate in size_candidates:
+                count = sum(1 for transaction in transaction_sets 
+                           if candidate.issubset(transaction))
+                support = count / total_transactions
+                if support >= min_support:
+                    candidate_counts[candidate] = {
+                        'itemset': list(candidate),
+                        'support': support,
+                        'count': count
+                    }
+        
+        return candidate_counts
+    
+    def _generate_candidates(self, frequent_itemsets, k):
+        """Generate candidate k-itemsets using Apriori principle"""
+        candidates = set()
+        
+        # Get all frequent (k-1)-itemsets
+        frequent_k_minus_1 = list(frequent_itemsets.keys())
+        
+        # Generate candidates by joining frequent (k-1)-itemsets
+        for i in range(len(frequent_k_minus_1)):
+            for j in range(i + 1, len(frequent_k_minus_1)):
+                itemset1 = frequent_k_minus_1[i]
+                itemset2 = frequent_k_minus_1[j]
+                
+                # Join if they share (k-2) items
+                union = itemset1.union(itemset2)
+                if len(union) == k:
+                    # Prune: check if all (k-1)-subsets are frequent
+                    if self._has_infrequent_subset(union, frequent_k_minus_1):
+                        continue
+                    candidates.add(union)
+        
+        return candidates
+    
+    def _has_infrequent_subset(self, candidate, frequent_itemsets):
+        """Check if candidate has any infrequent subset (pruning step)"""
+        for item in candidate:
+            subset = candidate - {item}
+            if subset not in frequent_itemsets:
+                return True
+        return False
+    
+    def _generate_association_rules(self, frequent_itemsets, min_confidence, total_transactions):
+        """Generate association rules from frequent itemsets"""
         rules = []
-        for itemset_data in frequent_itemsets:
-            if len(itemset_data['itemset']) == 2:
-                itemset = itemset_data['itemset']
-                for i in range(len(itemset)):
-                    antecedent = [itemset[i]]
-                    consequent = [itemset[1-i]]
+        
+        for itemset, itemset_data in frequent_itemsets.items():
+            if len(itemset) < 2:
+                continue
+            
+            # Generate all possible rules from this itemset
+            itemset_list = list(itemset)
+            for i in range(1, len(itemset_list)):
+                # Generate all combinations of antecedents
+                for antecedent_combo in combinations(itemset_list, i):
+                    antecedent = frozenset(antecedent_combo)
+                    consequent = itemset - antecedent
                     
-                    antecedent_support = self.calculate_support(antecedent)
+                    if not consequent:
+                        continue
+                    
+                    # Calculate confidence
+                    antecedent_support = self._get_itemset_support_from_frequent(antecedent, frequent_itemsets, total_transactions)
                     if antecedent_support > 0:
                         confidence = itemset_data['support'] / antecedent_support
-                        consequent_support = self.calculate_support(consequent)
-                        lift = confidence / consequent_support if consequent_support > 0 else 0
                         
-                        if confidence >= 0.5:
+                        if confidence >= min_confidence:
+                            # Calculate lift
+                            consequent_support = self._get_itemset_support_from_frequent(consequent, frequent_itemsets, total_transactions)
+                            lift = confidence / consequent_support if consequent_support > 0 else 0
+                            
                             rules.append({
-                                'antecedent': antecedent,
-                                'consequent': consequent,
+                                'antecedent': list(antecedent),
+                                'consequent': list(consequent),
                                 'support': itemset_data['support'],
                                 'confidence': confidence,
                                 'lift': lift,
                                 'count': itemset_data['count']
                             })
         
-        return frequent_itemsets, rules
+        return rules
+    
+    @lru_cache(maxsize=1000)
+    def _get_itemset_support(self, itemset_tuple, total_transactions):
+        """Get support for an itemset with caching for performance"""
+        itemset = set(itemset_tuple)
+        
+        # If not in frequent itemsets, calculate directly (for consequents)
+        count = sum(1 for transaction in self.transactions 
+                   if all(item in transaction for item in itemset))
+        return count / total_transactions if total_transactions > 0 else 0
+    
+    def _get_itemset_support_from_frequent(self, itemset, frequent_itemsets, total_transactions):
+        """Get support for an itemset from frequent itemsets or calculate if not found"""
+        if itemset in frequent_itemsets:
+            return frequent_itemsets[itemset]['support']
+        
+        # Use cached calculation for non-frequent itemsets
+        return self._get_itemset_support(tuple(sorted(itemset)), total_transactions)
     
     def calculate_support(self, itemset):
         """Calculate support for itemset"""
@@ -2210,8 +2370,10 @@ def pattern_analysis_analyze():
                 "message": "No file selected"
             }), 400
 
-        # Get min_support from form data (default to 0.05)
+        # Get algorithm parameters from form data
         min_support = float(request.form.get('min_support', 0.05))
+        min_confidence = float(request.form.get('min_confidence', 0.5))
+        max_itemset_size = int(request.form.get('max_itemset_size', 3))
 
         # Parse CSV file
         encodings = ["utf-8", "latin-1", "utf-8-sig", "cp1252", "utf-16"]
@@ -2279,8 +2441,12 @@ def pattern_analysis_analyze():
                 }
             }), 200
 
-        # Analyze patterns
-        frequent_itemsets, association_rules = pattern_analyzer.analyze_patterns(min_support)
+        # Analyze patterns with improved algorithm
+        frequent_itemsets, association_rules = pattern_analyzer.analyze_patterns(
+            min_support=min_support, 
+            min_confidence=min_confidence, 
+            max_itemset_size=max_itemset_size
+        )
         
         if not association_rules:
             issue_message = f"No significant patterns found with minimum support of {min_support*100:.0f}%. Try lowering the minimum support threshold or ensure your data contains meaningful associations."
