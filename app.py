@@ -1639,14 +1639,26 @@ def filter_meaningful_columns(df):
     
     # Common patterns for non-meaningful columns
     id_patterns = [
+        # Basic ID patterns
         r'^id$', r'^ID$', r'^Id$',
         r'^.*_id$', r'^.*_ID$', r'^.*_Id$',
         r'^id_.*$', r'^ID_.*$', r'^Id_.*$',
+        
+        # ID patterns with spaces
+        r'^.*\s+id$', r'^.*\s+ID$', r'^.*\s+Id$',
+        r'^id\s+.*$', r'^ID\s+.*$', r'^Id\s+.*$',
+        
+        # Master ID patterns (like "SSI Master ID")
+        r'^.*\s+master\s+id$', r'^.*\s+Master\s+ID$', r'^.*\s+MASTER\s+ID$',
+        r'^master\s+id\s+.*$', r'^Master\s+ID\s+.*$', r'^MASTER\s+ID\s+.*$',
+        
+        # Other common patterns
         r'^index$', r'^Index$', r'^INDEX$',
         r'^row$', r'^Row$', r'^ROW$',
         r'^rowid$', r'^RowID$', r'^ROWID$',
         r'^key$', r'^Key$', r'^KEY$',
         r'^primary_key$', r'^Primary_Key$', r'^PRIMARY_KEY$',
+        r'^primary\s+key$', r'^Primary\s+Key$', r'^PRIMARY\s+KEY$',
         r'^uuid$', r'^UUID$', r'^Uuid$',
         r'^guid$', r'^GUID$', r'^Guid$',
         r'^hash$', r'^Hash$', r'^HASH$',
@@ -1693,8 +1705,11 @@ def filter_meaningful_columns(df):
                                 excluded_cols.add(col)
                                 continue
             
-            # Check if column name suggests it's an ID
-            if any(keyword in col_lower for keyword in ['id', 'key', 'index', 'row', 'serial', 'number', 'no', 'num', 'seq']):
+            # Check if column name suggests it's an ID (handle spaces)
+            col_normalized = col_lower.replace(' ', '_').replace('-', '_')
+            id_keywords = ['id', 'key', 'index', 'row', 'serial', 'number', 'no', 'num', 'seq', 'master_id', 'masterid']
+            
+            if any(keyword in col_normalized for keyword in id_keywords):
                 # But only exclude if it's highly unique
                 if uniqueness_ratio > 0.9:
                     excluded_cols.add(col)
@@ -1865,9 +1880,9 @@ def calculate_dashboard_metrics(df, schema_analysis):
     # Numeric metrics (using meaningful columns only)
     numeric_cols = meaningful_df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols[:3]:  # Top 3 numeric columns
-        if df[col].sum() > 0:
-            total_value = df[col].sum()
-            avg_value = df[col].mean()
+        if meaningful_df[col].sum() > 0:
+            total_value = meaningful_df[col].sum()
+            avg_value = meaningful_df[col].mean()
             
             metrics.append({
                 "number": int(total_value) if total_value == int(total_value) else round(total_value, 2),
@@ -1899,6 +1914,10 @@ def generate_quick_stats(df, schema_analysis):
     """Generate quick statistics for dashboard"""
     stats = []
     
+    # Filter out non-meaningful columns
+    meaningful_cols = filter_meaningful_columns(df)
+    meaningful_df = df[meaningful_cols]
+    
     stats.append({
         "key": "Business Domain",
         "value": schema_analysis.get('business_domain', 'general business').title()
@@ -1914,17 +1933,17 @@ def generate_quick_stats(df, schema_analysis):
         "value": f"{len(df):,}"
     })
     
-    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    completeness = (meaningful_df.notna().sum().sum() / (len(meaningful_df) * len(meaningful_df.columns))) * 100
     stats.append({
         "key": "Data Completeness",
         "value": f"{completeness:.1f}%"
     })
     
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    numeric_cols = meaningful_df.select_dtypes(include=[np.number]).columns
     if len(numeric_cols) > 0:
         for col in numeric_cols[:2]:
-            if df[col].sum() > 0:
-                total = df[col].sum()
+            if meaningful_df[col].sum() > 0:
+                total = meaningful_df[col].sum()
                 if total > 1000:
                     stats.append({
                         "key": f"Total {col.replace('_', ' ').title()}",
@@ -1942,21 +1961,26 @@ def generate_quick_stats(df, schema_analysis):
 def generate_analytics_summary(df):
     """Generate analytics summary for numeric columns"""
     analytics = []
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    # Filter out non-meaningful columns
+    meaningful_cols = filter_meaningful_columns(df)
+    meaningful_df = df[meaningful_cols]
+    
+    numeric_cols = meaningful_df.select_dtypes(include=[np.number]).columns
     
     for col in numeric_cols:
-        if not df[col].isna().all():
+        if not meaningful_df[col].isna().all():
             try:
                 analytics.append({
                     "name": col,
-                    "count": int(df[col].count()),
-                    "mean": round(float(df[col].mean()), 2) if not pd.isna(df[col].mean()) else 0.0,
-                    "std": round(float(df[col].std()), 2) if not pd.isna(df[col].std()) else 0.0,
-                    "min": round(float(df[col].min()), 2) if not pd.isna(df[col].min()) else 0.0,
-                    "25%": round(float(df[col].quantile(0.25)), 2) if not pd.isna(df[col].quantile(0.25)) else 0.0,
-                    "50%": round(float(df[col].median()), 2) if not pd.isna(df[col].median()) else 0.0,
-                    "75%": round(float(df[col].quantile(0.75)), 2) if not pd.isna(df[col].quantile(0.75)) else 0.0,
-                    "max": round(float(df[col].max()), 2) if not pd.isna(df[col].max()) else 0.0
+                    "count": int(meaningful_df[col].count()),
+                    "mean": round(float(meaningful_df[col].mean()), 2) if not pd.isna(meaningful_df[col].mean()) else 0.0,
+                    "std": round(float(meaningful_df[col].std()), 2) if not pd.isna(meaningful_df[col].std()) else 0.0,
+                    "min": round(float(meaningful_df[col].min()), 2) if not pd.isna(meaningful_df[col].min()) else 0.0,
+                    "25%": round(float(meaningful_df[col].quantile(0.25)), 2) if not pd.isna(meaningful_df[col].quantile(0.25)) else 0.0,
+                    "50%": round(float(meaningful_df[col].median()), 2) if not pd.isna(meaningful_df[col].median()) else 0.0,
+                    "75%": round(float(meaningful_df[col].quantile(0.75)), 2) if not pd.isna(meaningful_df[col].quantile(0.75)) else 0.0,
+                    "max": round(float(meaningful_df[col].max()), 2) if not pd.isna(meaningful_df[col].max()) else 0.0
                 })
             except Exception as e:
                 print(f"Error processing analytics for column {col}: {e}")
