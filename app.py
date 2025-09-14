@@ -476,45 +476,206 @@ class UniversalMarketBasketAnalyzer:
         self.df = df
         self.schema_analysis = schema_analysis
         self.transaction_fields = schema_analysis.get('transaction_fields', [])
-        self.transactions = self.prepare_universal_transactions()
+        self.transactions = self.prepare_enhanced_transactions()
     
-    def prepare_universal_transactions(self):
-        """Prepare transactions from any dataset structure"""
+    def prepare_enhanced_transactions(self):
+        """Enhanced transaction preparation with multiple detection strategies"""
         transactions = []
         
-        # If specific transaction fields are identified
+        # Strategy 1: Explicit transaction fields (existing approach)
         if self.transaction_fields:
             for field in self.transaction_fields:
                 if field in self.df.columns:
-                    for idx, row in self.df.iterrows():
-                        if pd.notna(row[field]):
-                            # Split comma-separated values
-                            items = [item.strip() for item in str(row[field]).split(',')]
-                            items = [item for item in items if item and item != '']
-                            if len(items) > 1:
-                                transactions.append(items)
-        else:
-            # Try to detect transactional patterns automatically
-            text_cols = self.df.select_dtypes(include=['object', 'string']).columns
-            
-            for col in text_cols:
-                # Look for comma-separated values
-                has_commas = self.df[col].astype(str).str.contains(',', na=False).sum()
-                if has_commas > len(self.df) * 0.1:  # If >10% have commas
-                    for idx, row in self.df.iterrows():
-                        if pd.notna(row[col]) and ',' in str(row[col]):
-                            items = [item.strip() for item in str(row[col]).split(',')]
-                            items = [item for item in items if item and item != '']
-                            if len(items) > 1:
-                                transactions.append(items)
-                    break  # Use first suitable column
+                    transactions.extend(self._extract_transactions_from_field(field))
+        
+        # Strategy 2: Auto-detect comma/delimiter separated fields
+        transactions.extend(self._detect_separated_value_fields())
+        
+        # Strategy 3: Binary/Boolean columns as transactions
+        transactions.extend(self._detect_binary_transactions())
+        
+        # Strategy 4: Category combinations across rows
+        transactions.extend(self._detect_categorical_combinations())
+        
+        # Strategy 5: Numerical range-based transactions
+        transactions.extend(self._detect_numerical_range_transactions())
+        
+        # Remove duplicates and empty transactions
+        unique_transactions = []
+        seen = set()
+        for trans in transactions:
+            if len(trans) > 1:  # Only keep transactions with multiple items
+                trans_tuple = tuple(sorted(trans))
+                if trans_tuple not in seen:
+                    unique_transactions.append(trans)
+                    seen.add(trans_tuple)
+        
+        return unique_transactions
+    
+    def _extract_transactions_from_field(self, field_name, separators=None):
+        """Extract transactions from a single field with multiple separators"""
+        if separators is None:
+            separators = [',', ';', '|', '/', '&', '+', '-', ' and ', ' & ']
+        
+        transactions = []
+        for idx, row in self.df.iterrows():
+            if pd.notna(row[field_name]):
+                value_str = str(row[field_name]).strip()
+                
+                # Try different separators
+                for sep in separators:
+                    if sep in value_str:
+                        items = [item.strip().lower() for item in value_str.split(sep)]
+                        items = [item for item in items if item and len(item) > 0]
+                        if len(items) > 1:
+                            transactions.append(items)
+                        break
         
         return transactions
     
-    def analyze_patterns(self, min_support=0.05):
-        """Analyze universal patterns"""
+    def _detect_separated_value_fields(self):
+        """Auto-detect fields with separated values"""
+        transactions = []
+        text_cols = self.df.select_dtypes(include=['object', 'string']).columns
+        
+        separators = [',', ';', '|', '/', '&', '+', '-']
+        
+        for col in text_cols:
+            # Skip if already processed
+            if col in self.transaction_fields:
+                continue
+                
+            separator_scores = {}
+            sample_size = min(100, len(self.df))
+            sample_data = self.df[col].dropna().head(sample_size)
+            
+            for sep in separators:
+                score = 0
+                for value in sample_data:
+                    if pd.notna(value) and sep in str(value):
+                        parts = str(value).split(sep)
+                        if len(parts) > 1 and all(len(p.strip()) > 0 for p in parts):
+                            score += len(parts)
+                
+                if score > 0:
+                    separator_scores[sep] = score
+            
+            # If we found a good separator, extract transactions
+            if separator_scores:
+                best_sep = max(separator_scores, key=separator_scores.get)
+                # Only use if at least 10% of non-null values have the separator
+                threshold = max(1, len(sample_data) * 0.1)
+                if separator_scores[best_sep] > threshold:
+                    field_transactions = self._extract_transactions_from_field(col, [best_sep])
+                    transactions.extend(field_transactions)
+        
+        return transactions
+    
+    def _detect_binary_transactions(self):
+        """Detect transactions from binary/boolean columns"""
+        transactions = []
+        
+        # Find binary columns (0/1, True/False, Yes/No, etc.)
+        binary_cols = []
+        for col in self.df.columns:
+            unique_vals = self.df[col].dropna().unique()
+            if len(unique_vals) == 2:
+                binary_cols.append(col)
+        
+        if len(binary_cols) < 2:
+            return transactions
+        
+        # Create transactions for each row where multiple binary columns are "true"
+        for idx, row in self.df.iterrows():
+            true_items = []
+            for col in binary_cols:
+                if pd.notna(row[col]):
+                    val = str(row[col]).lower()
+                    if val in ['1', '1.0', 'true', 'yes', 'y', 'on', 'active']:
+                        true_items.append(f"{col.lower()}")
+            
+            if len(true_items) > 1:
+                transactions.append(true_items)
+        
+        return transactions
+    
+    def _detect_categorical_combinations(self):
+        """Create transactions from categorical column combinations"""
+        transactions = []
+        
+        # Find categorical columns with reasonable cardinality
+        categorical_cols = []
+        for col in self.df.select_dtypes(include=['object', 'string']).columns:
+            unique_count = self.df[col].nunique()
+            if 2 <= unique_count <= 20:  # Reasonable range for categories
+                categorical_cols.append(col)
+        
+        if len(categorical_cols) < 2:
+            return transactions
+        
+        # Create transactions from combinations of categorical values
+        for idx, row in self.df.iterrows():
+            items = []
+            for col in categorical_cols:
+                if pd.notna(row[col]):
+                    val = str(row[col]).strip().lower()
+                    if val and len(val) > 0:
+                        items.append(f"{col}_{val}")
+            
+            if len(items) > 1:
+                transactions.append(items)
+        
+        return transactions
+    
+    def _detect_numerical_range_transactions(self):
+        """Create transactions from numerical ranges"""
+        transactions = []
+        numeric_cols = self.df.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_cols) < 2:
+            return transactions
+        
+        # Create range-based categories for numeric columns
+        range_mappings = {}
+        for col in numeric_cols[:5]:  # Limit to first 5 numeric columns
+            if self.df[col].nunique() > 10:  # Only for columns with sufficient variance
+                try:
+                    # Create quartile-based ranges
+                    quartiles = self.df[col].quantile([0, 0.25, 0.5, 0.75, 1.0])
+                    range_mappings[col] = {
+                        'very_low': (quartiles[0], quartiles[0.25]),
+                        'low': (quartiles[0.25], quartiles[0.5]),
+                        'high': (quartiles[0.5], quartiles[0.75]),
+                        'very_high': (quartiles[0.75], quartiles[1.0])
+                    }
+                except Exception:
+                    continue
+        
+        if not range_mappings:
+            return transactions
+        
+        # Create transactions from range combinations
+        for idx, row in self.df.iterrows():
+            range_items = []
+            for col, ranges in range_mappings.items():
+                if pd.notna(row[col]):
+                    value = row[col]
+                    for range_name, (min_val, max_val) in ranges.items():
+                        if min_val <= value <= max_val:
+                            range_items.append(f"{col}_{range_name}")
+                            break
+            
+            if len(range_items) > 1:
+                transactions.append(range_items)
+        
+        return transactions
+    
+    def analyze_patterns(self, min_support=0.02):
+        """Enhanced pattern analysis with adaptive minimum support"""
         if not self.transactions:
             return [], []
+        
+        print(f"Analyzing {len(self.transactions)} transactions...")
         
         # Get all unique items
         all_items = set()
@@ -522,60 +683,137 @@ class UniversalMarketBasketAnalyzer:
             all_items.update(transaction)
         
         all_items = list(all_items)
+        print(f"Found {len(all_items)} unique items")
+        
+        # Adaptive minimum support based on dataset size
+        adaptive_min_support = max(min_support, 1 / len(self.transactions))
+        
         frequent_itemsets = []
         
-        # Generate frequent itemsets
+        # 1-itemsets
+        item_support = {}
         for item in all_items:
             support = self.calculate_support([item])
-            if support >= min_support:
+            item_support[item] = support
+            if support >= adaptive_min_support:
                 frequent_itemsets.append({
                     'itemset': [item],
                     'support': support,
                     'count': int(support * len(self.transactions))
                 })
         
-        # Generate 2-itemsets
-        for combo in combinations(all_items, 2):
+        print(f"Found {len(frequent_itemsets)} frequent 1-itemsets")
+        
+        # Get frequent items for further processing
+        frequent_items = [item for item in all_items if item_support[item] >= adaptive_min_support]
+        
+        # 2-itemsets (most important for association rules)
+        frequent_pairs = []
+        for combo in combinations(frequent_items, 2):
             support = self.calculate_support(list(combo))
-            if support >= min_support:
+            if support >= adaptive_min_support:
                 frequent_itemsets.append({
                     'itemset': list(combo),
                     'support': support,
                     'count': int(support * len(self.transactions))
                 })
+                frequent_pairs.append((list(combo), support))
         
-        # Generate association rules
+        print(f"Found {len(frequent_pairs)} frequent 2-itemsets")
+        
+        # 3-itemsets (for richer patterns, but computationally expensive)
+        if len(frequent_items) <= 50:  # Only if manageable number of items
+            for combo in combinations(frequent_items, 3):
+                support = self.calculate_support(list(combo))
+                if support >= adaptive_min_support:
+                    frequent_itemsets.append({
+                        'itemset': list(combo),
+                        'support': support,
+                        'count': int(support * len(self.transactions))
+                    })
+        
+        # Generate association rules with lower confidence threshold
         rules = []
+        min_confidence = 0.3  # Lowered from 0.5
+        
         for itemset_data in frequent_itemsets:
-            if len(itemset_data['itemset']) == 2:
-                itemset = itemset_data['itemset']
-                for i in range(len(itemset)):
-                    antecedent = [itemset[i]]
-                    consequent = [itemset[1-i]]
-                    
-                    antecedent_support = self.calculate_support(antecedent)
-                    if antecedent_support > 0:
-                        confidence = itemset_data['support'] / antecedent_support
-                        consequent_support = self.calculate_support(consequent)
-                        lift = confidence / consequent_support if consequent_support > 0 else 0
+            itemset = itemset_data['itemset']
+            if len(itemset) >= 2:
+                # Generate all possible rule combinations
+                for i in range(1, len(itemset)):
+                    for antecedent in combinations(itemset, i):
+                        antecedent = list(antecedent)
+                        consequent = [item for item in itemset if item not in antecedent]
                         
-                        if confidence >= 0.5:
-                            rules.append({
-                                'antecedent': antecedent,
-                                'consequent': consequent,
-                                'support': itemset_data['support'],
-                                'confidence': confidence,
-                                'lift': lift,
-                                'count': itemset_data['count']
-                            })
+                        if len(consequent) > 0:
+                            antecedent_support = self.calculate_support(antecedent)
+                            if antecedent_support > 0:
+                                confidence = itemset_data['support'] / antecedent_support
+                                
+                                if confidence >= min_confidence:
+                                    consequent_support = self.calculate_support(consequent)
+                                    lift = confidence / consequent_support if consequent_support > 0 else 0
+                                    
+                                    # Only include rules with meaningful lift
+                                    if lift > 1.0:
+                                        rules.append({
+                                            'antecedent': antecedent,
+                                            'consequent': consequent,
+                                            'support': itemset_data['support'],
+                                            'confidence': confidence,
+                                            'lift': lift,
+                                            'count': itemset_data['count']
+                                        })
+        
+        print(f"Generated {len(rules)} association rules")
+        
+        # Sort rules by lift * confidence for better quality
+        rules.sort(key=lambda x: x['lift'] * x['confidence'], reverse=True)
         
         return frequent_itemsets, rules
     
     def calculate_support(self, itemset):
         """Calculate support for itemset"""
+        if not self.transactions:
+            return 0
+        
         count = sum(1 for transaction in self.transactions 
                    if all(item in transaction for item in itemset))
-        return count / len(self.transactions) if self.transactions else 0
+        return count / len(self.transactions)
+    
+    def get_analysis_summary(self):
+        """Get summary of what types of patterns were detected"""
+        summary = {
+            "total_transactions": len(self.transactions),
+            "detection_methods_used": [],
+            "average_transaction_size": 0,
+            "unique_items_count": 0
+        }
+        
+        if self.transactions:
+            all_items = set()
+            transaction_sizes = []
+            
+            for trans in self.transactions:
+                all_items.update(trans)
+                transaction_sizes.append(len(trans))
+            
+            summary["average_transaction_size"] = np.mean(transaction_sizes)
+            summary["unique_items_count"] = len(all_items)
+            
+            # Detect which methods were likely used based on item patterns
+            sample_items = list(all_items)[:10]
+            
+            if any('_' in item for item in sample_items):
+                summary["detection_methods_used"].append("categorical_combinations")
+            
+            if any(any(sep in str(item) for sep in [',', ';', '|']) for item in sample_items):
+                summary["detection_methods_used"].append("separated_values")
+            
+            if any('very_low' in str(item) or 'high' in str(item) for item in sample_items):
+                summary["detection_methods_used"].append("numerical_ranges")
+        
+        return summary
 
 def generate_pattern_business_insights(rules, domain, primary_entity):
     """Generate domain-specific business insights from patterns"""
