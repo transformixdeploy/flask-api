@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import json
+import re
 import google.generativeai as genai
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -1633,10 +1634,93 @@ def generate_dashboard_insights(df, schema_analysis):
         # Fallback to rule-based dashboard generation
         return generate_fallback_dashboard(df, schema_analysis)
 
+def filter_meaningful_columns(df):
+    """Filter out non-meaningful columns like IDs, indices, and other non-business columns"""
+    
+    # Common patterns for non-meaningful columns
+    id_patterns = [
+        r'^id$', r'^ID$', r'^Id$',
+        r'^.*_id$', r'^.*_ID$', r'^.*_Id$',
+        r'^id_.*$', r'^ID_.*$', r'^Id_.*$',
+        r'^index$', r'^Index$', r'^INDEX$',
+        r'^row$', r'^Row$', r'^ROW$',
+        r'^rowid$', r'^RowID$', r'^ROWID$',
+        r'^key$', r'^Key$', r'^KEY$',
+        r'^primary_key$', r'^Primary_Key$', r'^PRIMARY_KEY$',
+        r'^uuid$', r'^UUID$', r'^Uuid$',
+        r'^guid$', r'^GUID$', r'^Guid$',
+        r'^hash$', r'^Hash$', r'^HASH$',
+        r'^token$', r'^Token$', r'^TOKEN$',
+        r'^reference$', r'^Reference$', r'^REFERENCE$',
+        r'^ref$', r'^Ref$', r'^REF$',
+        r'^code$', r'^Code$', r'^CODE$',
+        r'^number$', r'^Number$', r'^NUMBER$',
+        r'^no$', r'^No$', r'^NO$',
+        r'^num$', r'^Num$', r'^NUM$',
+        r'^seq$', r'^Seq$', r'^SEQ$',
+        r'^serial$', r'^Serial$', r'^SERIAL$'
+    ]
+    
+    # Columns to exclude based on patterns
+    excluded_cols = set()
+    
+    for col in df.columns:
+        col_lower = col.lower().strip()
+        
+        # Check against ID patterns
+        for pattern in id_patterns:
+            if re.match(pattern, col, re.IGNORECASE):
+                excluded_cols.add(col)
+                break
+        
+        # Additional heuristics for numeric columns that look like IDs
+        if df[col].dtype in ['int64', 'int32', 'float64', 'float32']:
+            # Check if column has high uniqueness (like an ID)
+            uniqueness_ratio = df[col].nunique() / len(df)
+            
+            # If it's highly unique and has sequential-like values, likely an ID
+            if uniqueness_ratio > 0.95:
+                # Check if values are mostly sequential
+                if len(df) > 10:
+                    sorted_values = df[col].dropna().sort_values()
+                    if len(sorted_values) > 1:
+                        # Check if values are mostly sequential
+                        diffs = sorted_values.diff().dropna()
+                        if len(diffs) > 0:
+                            # If most differences are 1 (sequential), it's likely an ID
+                            sequential_ratio = (diffs == 1).sum() / len(diffs)
+                            if sequential_ratio > 0.8:
+                                excluded_cols.add(col)
+                                continue
+            
+            # Check if column name suggests it's an ID
+            if any(keyword in col_lower for keyword in ['id', 'key', 'index', 'row', 'serial', 'number', 'no', 'num', 'seq']):
+                # But only exclude if it's highly unique
+                if uniqueness_ratio > 0.9:
+                    excluded_cols.add(col)
+    
+    # Return meaningful columns
+    meaningful_cols = [col for col in df.columns if col not in excluded_cols]
+    
+    # Ensure we don't exclude all columns
+    if len(meaningful_cols) == 0:
+        print("Warning: All columns were filtered out. Using original columns.")
+        return list(df.columns)
+    
+    # Log excluded columns for debugging
+    if excluded_cols:
+        print(f"Excluded non-meaningful columns: {list(excluded_cols)}")
+        print(f"Using {len(meaningful_cols)} meaningful columns: {meaningful_cols}")
+    
+    return meaningful_cols
+
 def create_dashboard_context(df, schema_analysis):
     """Create comprehensive context for dashboard generation"""
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    text_cols = df.select_dtypes(include=['object', 'string']).columns
+    # Filter out non-meaningful columns (IDs, indices, etc.)
+    meaningful_cols = filter_meaningful_columns(df)
+    
+    numeric_cols = df[meaningful_cols].select_dtypes(include=[np.number]).columns
+    text_cols = df[meaningful_cols].select_dtypes(include=['object', 'string']).columns
     
     # Statistical summary
     statistical_summary = {}
@@ -1759,6 +1843,9 @@ def calculate_dashboard_metrics(df, schema_analysis):
     metrics = []
     entity = schema_analysis.get('primary_entity', 'record')
     
+    # Filter out non-meaningful columns
+    meaningful_cols = filter_meaningful_columns(df)
+    
     # Primary metric: Total records
     metrics.append({
         "number": len(df),
@@ -1766,16 +1853,17 @@ def calculate_dashboard_metrics(df, schema_analysis):
         "description": f"Total number of {entity}s in the dataset"
     })
     
-    # Data completeness metric
-    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    # Data completeness metric (using meaningful columns only)
+    meaningful_df = df[meaningful_cols]
+    completeness = (meaningful_df.notna().sum().sum() / (len(meaningful_df) * len(meaningful_df.columns))) * 100
     metrics.append({
         "number": round(completeness, 1),
         "title": "Data Completeness",
-        "description": "Percentage of non-missing data across all fields"
+        "description": "Percentage of non-missing data across meaningful fields"
     })
     
-    # Numeric metrics
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    # Numeric metrics (using meaningful columns only)
+    numeric_cols = meaningful_df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols[:3]:  # Top 3 numeric columns
         if df[col].sum() > 0:
             total_value = df[col].sum()
@@ -1900,7 +1988,11 @@ def generate_fallback_dashboard(df, schema_analysis):
 def generate_fallback_insights(df, schema_analysis):
     domain = schema_analysis.get('business_domain', 'general business')
     entity = schema_analysis.get('primary_entity', 'record')
-    completeness = (df.notna().sum().sum() / (len(df) * len(df.columns))) * 100
+    
+    # Use meaningful columns for completeness calculation
+    meaningful_cols = filter_meaningful_columns(df)
+    meaningful_df = df[meaningful_cols]
+    completeness = (meaningful_df.notna().sum().sum() / (len(meaningful_df) * len(meaningful_df.columns))) * 100
     
     primary_insights = [
         f"Dataset contains {len(df):,} {entity} records from {domain} domain",
@@ -1918,9 +2010,9 @@ def generate_fallback_insights(df, schema_analysis):
     else:
         primary_insights.append(f"Business data structure optimized for {entity} analysis and reporting")
     
-    numeric_cols = len(df.select_dtypes(include=[np.number]).columns)
+    numeric_cols = len(meaningful_df.select_dtypes(include=[np.number]).columns)
     if numeric_cols > 0:
-        primary_insights.append(f"Contains {numeric_cols} quantitative fields suitable for statistical analysis")
+        primary_insights.append(f"Contains {numeric_cols} meaningful quantitative fields suitable for statistical analysis")
     
     actionable_insights = [
         f"Implement {entity} segmentation based on key categorical fields",
