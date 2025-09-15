@@ -1436,50 +1436,38 @@ class SmartRAGAssistant:
         
     def create_rag_prompt(self, question, data_context):
         prompt = f"""You are an expert Business Intelligence Analyst with access to a comprehensive dataset. Analyze the data thoroughly and provide actionable insights.
-
     ## DATASET OVERVIEW
     **Business Domain**: {data_context['metadata']['business_domain']}
     **Primary Entity**: {data_context['metadata']['primary_entity']}
     **Dataset Size**: {data_context['metadata']['total_records']:,} records across {len(data_context['metadata']['columns'])} columns
     **Data Quality**: {(data_context['data_quality']['completeness']):.1f}% complete
-
     ## AVAILABLE DATA FIELDS
     **Columns**: {', '.join(data_context['metadata']['columns'])}
-
     ## STATISTICAL INSIGHTS
     {json.dumps(data_context['statistical_summary'], indent=2) if data_context['statistical_summary'] else "No numerical data available"}
-
     ## CATEGORICAL PATTERNS
     {json.dumps(data_context['categorical_insights'], indent=2) if data_context['categorical_insights'] else "No categorical patterns identified"}
-
     ## COMBINED FIELD ANALYSIS (Products, Tags, Purchase History)
     {json.dumps(data_context['combined_fields_analysis'], indent=2) if data_context['combined_fields_analysis'] else "No combined field patterns detected"}
-
     ## DATA QUALITY ASSESSMENT
     - **Missing Values**: {data_context['data_quality']['missing_by_column']}
     - **Duplicate Records**: {data_context['data_quality']['duplicate_rows']}
     - **Overall Completeness**: {data_context['data_quality']['completeness']:.1f}%
-
     ## SAMPLE RECORDS
     ```json
     {json.dumps(data_context['sample_data'][:3], indent=2)}
     ```
-
     ---
-
     ## USER QUESTION
     "{question}"
-
     ## ANALYSIS INSTRUCTIONS
     1. **Data Consistency**: Reference ONLY the data provided above. Do not perform separate calculations.
     2. **Business Context**: Frame insights within the {data_context['metadata']['business_domain']} domain.
     3. **Evidence-Based**: Support every claim with specific data points from the provided statistics.
     4. **Actionable Focus**: Prioritize insights that can drive business decisions.
     5. **Pattern Recognition**: Identify trends, outliers, and correlations in the data.
-
     ## RESPONSE FORMAT
     Respond with a properly formatted JSON object:
-
     ```json
     {{
         "analysis": "Comprehensive answer addressing the specific question with concrete data insights and business implications",
@@ -1511,7 +1499,6 @@ class SmartRAGAssistant:
         ]
     }}
     ```
-
     ## QUALITY CHECKLIST
     - ✓ All statistics reference the provided data
     - ✓ Business domain context is incorporated
@@ -1926,16 +1913,48 @@ Generate insights that transform raw data into strategic business intelligence.
 
 def parse_dashboard_response(response_text):
     try:
+        if not response_text:
+            return {}
+
         clean_response = response_text.strip()
-        if clean_response.startswith('```json'):
-            clean_response = clean_response[7:-3]
-        elif clean_response.startswith('```'):
-            clean_response = clean_response[3:-3]
-        
-        return json.loads(clean_response)
+
+        # Prefer JSON inside fenced code blocks if present
+        fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", clean_response, re.IGNORECASE)
+        if fenced_match:
+            candidate = fenced_match.group(1).strip()
+        else:
+            candidate = clean_response
+            # If there is leading prose before JSON, locate the first JSON-looking start
+            first_obj = candidate.find('{')
+            first_arr = candidate.find('[')
+            starts = [s for s in [first_obj, first_arr] if s != -1]
+            if starts:
+                start_idx = min(starts)
+                candidate = candidate[start_idx:]
+
+                # Extract a balanced JSON object/array to avoid trailing prose
+                def extract_balanced(text, open_ch, close_ch):
+                    depth = 0
+                    for idx, ch in enumerate(text):
+                        if ch == open_ch:
+                            depth += 1
+                        elif ch == close_ch:
+                            depth -= 1
+                            if depth == 0:
+                                return text[:idx+1]
+                    return text
+
+                if candidate.startswith('{'):
+                    candidate = extract_balanced(candidate, '{', '}')
+                elif candidate.startswith('['):
+                    candidate = extract_balanced(candidate, '[', ']')
+
+        candidate = candidate.strip().strip('`')
+        return json.loads(candidate)
     except json.JSONDecodeError as e:
         print(f"Failed to parse AI response: {e}")
-        return None
+        # Return empty dict so caller can gracefully fall back
+        return {}
 
 def calculate_dashboard_metrics(df, schema_analysis):
     """Calculate key performance metrics for dashboard"""
