@@ -1410,6 +1410,7 @@ class SmartRAGAssistant:
             # Updated Claude API call
             response = self.client.messages.create(
                 model="claude-3-5-haiku-latest",  # Use Claude Sonnet 3.5
+                max_tokens=5000,
                 temperature=0.7,
                 system="You are a Smart Business Intelligence Assistant.",
                 messages=[
@@ -1653,6 +1654,7 @@ def generate_dashboard_insights(df, schema_analysis):
         prompt = create_dashboard_prompt(data_context)
         response = client.messages.create(
             model="claude-3-5-haiku-latest",
+            max_tokens=5000,
             temperature=0.7,
             system="You are a Business Intelligence Dashboard Generator.",
             messages=[
