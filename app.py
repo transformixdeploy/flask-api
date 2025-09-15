@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 import re
-import openai
+import anthropic
 from datetime import datetime
 from flask import Flask, request, jsonify
 from collections import defaultdict
@@ -13,11 +13,11 @@ from functools import lru_cache
 import time
 app = Flask(__name__)
 load_dotenv()
-OPENAI_API_KEY=os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable is required")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")  
+if not ANTHROPIC_API_KEY:
+    raise ValueError("ANTHROPIC_API_KEY environment variable is required")  # Update message
 
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) 
 class DataSchemaAnalyzer:
     def __init__(self, df):
         self.df = df
@@ -806,7 +806,7 @@ class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._parsed_fields_cache = {}
     
     def detect_combined_fields(self):
@@ -1407,30 +1407,30 @@ class SmartRAGAssistant:
             data_context = self.create_data_context()
             prompt = self.create_rag_prompt(question, data_context)
             
-            # Updated OpenAI API call
-            response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a Smart Business Intelligence Assistant."},
-                    {"role": "user", "content": prompt}
-                ],
+            # Updated Claude API call
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",  # Use Claude Sonnet 3.5
+                max_tokens=2000,
                 temperature=0.7,
-                max_tokens=2000
+                system="You are a Smart Business Intelligence Assistant.",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
             )
             
-            parsed_response = self.parse_rag_response(response.choices[0].message.content, question)
+            parsed_response = self.parse_rag_response(response.content[0].text, question)
             return parsed_response
             
-        except openai.error.RateLimitError:
-            return self.fallback_answer(question, "OpenAI rate limit exceeded")
-        except openai.error.AuthenticationError:
-            return self.fallback_answer(question, "OpenAI authentication failed")
-        except openai.error.InvalidRequestError as e:
-            return self.fallback_answer(question, f"Invalid OpenAI request: {str(e)}")
-        except openai.error.APIConnectionError:
-            return self.fallback_answer(question, "Failed to connect to OpenAI API")
-        except openai.error.APIError as e:
-            return self.fallback_answer(question, f"OpenAI API error: {str(e)}")
+        except anthropic.RateLimitError:
+            return self.fallback_answer(question, "Claude rate limit exceeded")
+        except anthropic.AuthenticationError:
+            return self.fallback_answer(question, "Claude authentication failed")
+        except anthropic.BadRequestError as e:
+            return self.fallback_answer(question, f"Invalid Claude request: {str(e)}")
+        except anthropic.APIConnectionError:
+            return self.fallback_answer(question, "Failed to connect to Claude API")
+        except anthropic.APIError as e:
+            return self.fallback_answer(question, f"Claude API error: {str(e)}")
         except Exception as e:
             return self.fallback_answer(question, str(e))
         
@@ -1645,25 +1645,25 @@ def format_response_structure(rag_result):
     }
 def generate_dashboard_insights(df, schema_analysis):
     try:
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         
         # Create comprehensive data context
         data_context = create_dashboard_context(df, schema_analysis)
         
-        # Generate insights using OpenAI
+        # Generate insights using Claude
         prompt = create_dashboard_prompt(data_context)
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a Business Intelligence Dashboard Generator."},
-                {"role": "user", "content": prompt}
-            ],
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=2000,
             temperature=0.7,
-            max_tokens=2000
+            system="You are a Business Intelligence Dashboard Generator.",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
         )
         
-        # Parse AI response and combine with calculated metrics
-        ai_insights = parse_dashboard_response(response.choices[0].message.content)
+        # Parse Claude response and combine with calculated metrics
+        ai_insights = parse_dashboard_response(response.content[0].text)
         calculated_metrics = calculate_dashboard_metrics(df, schema_analysis)
         
         # Merge AI insights with calculated data
@@ -1671,23 +1671,23 @@ def generate_dashboard_insights(df, schema_analysis):
         
         return dashboard_data
         
-    except openai.error.RateLimitError:
-        print("OpenAI rate limit exceeded for dashboard generation")
+    except anthropic.RateLimitError:
+        print("Claude rate limit exceeded for dashboard generation")
         return generate_fallback_dashboard(df, schema_analysis)
-    except openai.error.AuthenticationError:
-        print("OpenAI authentication failed for dashboard generation")
+    except anthropic.AuthenticationError:
+        print("Claude authentication failed for dashboard generation")
         return generate_fallback_dashboard(df, schema_analysis)
-    except openai.error.InvalidRequestError as e:
-        print(f"Invalid OpenAI request for dashboard: {str(e)}")
+    except anthropic.BadRequestError as e:
+        print(f"Invalid Claude request for dashboard: {str(e)}")
         return generate_fallback_dashboard(df, schema_analysis)
-    except openai.error.APIConnectionError:
-        print("Failed to connect to OpenAI API for dashboard generation")
+    except anthropic.APIConnectionError:
+        print("Failed to connect to Claude API for dashboard generation")
         return generate_fallback_dashboard(df, schema_analysis)
-    except openai.error.APIError as e:
-        print(f"OpenAI API error for dashboard: {str(e)}")
+    except anthropic.APIError as e:
+        print(f"Claude API error for dashboard: {str(e)}")
         return generate_fallback_dashboard(df, schema_analysis)
     except Exception as e:
-        print(f"OpenAI dashboard generation failed: {str(e)}")
+        print(f"Claude dashboard generation failed: {str(e)}")
         return generate_fallback_dashboard(df, schema_analysis)
 
 def filter_meaningful_columns(df):
@@ -1910,6 +1910,7 @@ Generate strategic business insights formatted as JSON:
 
 Generate insights that transform raw data into strategic business intelligence.
 """
+
 
 def parse_dashboard_response(response_text):
     try:
