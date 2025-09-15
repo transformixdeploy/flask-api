@@ -806,7 +806,7 @@ class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-pro')
         self._parsed_fields_cache = {}
     
     def detect_combined_fields(self):
@@ -1611,7 +1611,7 @@ def format_response_structure(rag_result):
 def generate_dashboard_insights(df, schema_analysis):
     """Generate comprehensive dashboard insights using Gemini AI"""
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-pro')
         
         # Create comprehensive data context
         data_context = create_dashboard_context(df, schema_analysis)
@@ -2629,3 +2629,4 @@ def pattern_analysis_analyze():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
