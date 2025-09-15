@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import json
 import re
-import google.generativeai as genai
+import openai
 from datetime import datetime
 from flask import Flask, request, jsonify
 from collections import defaultdict
@@ -13,11 +13,11 @@ from functools import lru_cache
 import time
 app = Flask(__name__)
 load_dotenv()
-GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is required")
+OPENAI_API_KEY=os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is required")
 
-genai.configure(api_key=GEMINI_API_KEY)
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 class DataSchemaAnalyzer:
     def __init__(self, df):
         self.df = df
@@ -806,7 +806,7 @@ class SmartRAGAssistant:
     def __init__(self, df, schema_analysis):
         self.df = df
         self.schema_analysis = schema_analysis
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.client = openai.OpenAI(api_key=OPENAI_API_KEY)
         self._parsed_fields_cache = {}
     
     def detect_combined_fields(self):
@@ -1406,71 +1406,119 @@ class SmartRAGAssistant:
             
             data_context = self.create_data_context()
             prompt = self.create_rag_prompt(question, data_context)
-            response = self.model.generate_content(prompt)
-            parsed_response = self.parse_rag_response(response.text, question)
             
+            # Updated OpenAI API call
+            response = self.client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a Smart Business Intelligence Assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            parsed_response = self.parse_rag_response(response.choices[0].message.content, question)
             return parsed_response
             
+        except openai.error.RateLimitError:
+            return self.fallback_answer(question, "OpenAI rate limit exceeded")
+        except openai.error.AuthenticationError:
+            return self.fallback_answer(question, "OpenAI authentication failed")
+        except openai.error.InvalidRequestError as e:
+            return self.fallback_answer(question, f"Invalid OpenAI request: {str(e)}")
+        except openai.error.APIConnectionError:
+            return self.fallback_answer(question, "Failed to connect to OpenAI API")
+        except openai.error.APIError as e:
+            return self.fallback_answer(question, f"OpenAI API error: {str(e)}")
         except Exception as e:
             return self.fallback_answer(question, str(e))
-    
-    def create_rag_prompt(self, question, data_context):
-        prompt = f"""
-You are a Smart Business Intelligence Assistant with direct access to the following dataset:
-
-BUSINESS CONTEXT:
-- Domain: {data_context['metadata']['business_domain']}
-- Entity Type: {data_context['metadata']['primary_entity']}
-- Total Records: {data_context['metadata']['total_records']:,}
-- Columns: {', '.join(data_context['metadata']['columns'])}
-
-STATISTICAL SUMMARY:
-{json.dumps(data_context['statistical_summary'], indent=2)}
-
-CATEGORICAL DATA INSIGHTS:
-{json.dumps(data_context['categorical_insights'], indent=2)}
-
-COMBINED FIELDS ANALYSIS (Products, Tags, etc.):
-{json.dumps(data_context['combined_fields_analysis'], indent=2)}
-
-IMPORTANT: When analyzing combined fields, use the data provided above consistently:
-- For individual item popularity: Use 'individual_items' -> 'top_10_individual_items'
-- For combination patterns: Use 'combination_patterns' -> 'top_10_combinations'
-- Always reference the SAME data source to avoid contradictions
-
-DATA QUALITY METRICS:
-{json.dumps(data_context['data_quality'], indent=2)}
-
-SAMPLE DATA (First {len(data_context['sample_data'])} records):
-{json.dumps(data_context['sample_data'], indent=2)}
-
-USER QUESTION: "{question}"
-
-Instructions:
-1. Pay special attention to COMBINED FIELDS ANALYSIS - this contains both individual items AND combination patterns
-2. For individual products: Use the 'individual_items' section
-3. For product combinations: Use the 'combination_patterns' section
-4. ALWAYS reference the exact same data shown above - don't perform separate analysis
-5. Be consistent with naming and counts across different questions
-6. Provide specific, data-driven answers based on the actual dataset
-7. Include relevant statistics, trends, and patterns
-8. If you need to make assumptions, state them clearly
-
-Respond in JSON format:
-{{
-    "analysis": "Detailed answer to the user's question",
-    "confidence": 0.85,
-    "key_findings": ["Finding 1", "Finding 2", "Finding 3"],
-    "relevant_statistics": {{"stat_name": "value", "description": "explanation"}},
-    "actionable_insights": ["Insight 1", "Insight 2"],
-    "data_evidence": ["Evidence 1", "Evidence 2"],
-    "confidence_level": "high",
-    "follow_up_questions": ["Question 1", "Question 2"]
-}}
-
-Be specific, use actual data values, and provide concrete insights based on the dataset provided.
-"""
         
+    def create_rag_prompt(self, question, data_context):
+        prompt = f"""You are an expert Business Intelligence Analyst with access to a comprehensive dataset. Analyze the data thoroughly and provide actionable insights.
+
+    ## DATASET OVERVIEW
+    **Business Domain**: {data_context['metadata']['business_domain']}
+    **Primary Entity**: {data_context['metadata']['primary_entity']}
+    **Dataset Size**: {data_context['metadata']['total_records']:,} records across {len(data_context['metadata']['columns'])} columns
+    **Data Quality**: {(data_context['data_quality']['completeness']):.1f}% complete
+
+    ## AVAILABLE DATA FIELDS
+    **Columns**: {', '.join(data_context['metadata']['columns'])}
+
+    ## STATISTICAL INSIGHTS
+    {json.dumps(data_context['statistical_summary'], indent=2) if data_context['statistical_summary'] else "No numerical data available"}
+
+    ## CATEGORICAL PATTERNS
+    {json.dumps(data_context['categorical_insights'], indent=2) if data_context['categorical_insights'] else "No categorical patterns identified"}
+
+    ## COMBINED FIELD ANALYSIS (Products, Tags, Purchase History)
+    {json.dumps(data_context['combined_fields_analysis'], indent=2) if data_context['combined_fields_analysis'] else "No combined field patterns detected"}
+
+    ## DATA QUALITY ASSESSMENT
+    - **Missing Values**: {data_context['data_quality']['missing_by_column']}
+    - **Duplicate Records**: {data_context['data_quality']['duplicate_rows']}
+    - **Overall Completeness**: {data_context['data_quality']['completeness']:.1f}%
+
+    ## SAMPLE RECORDS
+    ```json
+    {json.dumps(data_context['sample_data'][:3], indent=2)}
+    ```
+
+    ---
+
+    ## USER QUESTION
+    "{question}"
+
+    ## ANALYSIS INSTRUCTIONS
+    1. **Data Consistency**: Reference ONLY the data provided above. Do not perform separate calculations.
+    2. **Business Context**: Frame insights within the {data_context['metadata']['business_domain']} domain.
+    3. **Evidence-Based**: Support every claim with specific data points from the provided statistics.
+    4. **Actionable Focus**: Prioritize insights that can drive business decisions.
+    5. **Pattern Recognition**: Identify trends, outliers, and correlations in the data.
+
+    ## RESPONSE FORMAT
+    Respond with a properly formatted JSON object:
+
+    ```json
+    {{
+        "analysis": "Comprehensive answer addressing the specific question with concrete data insights and business implications",
+        "confidence": 0.85,
+        "key_findings": [
+            "Specific finding with actual numbers/percentages",
+            "Pattern identified in the data",
+            "Significant trend or correlation"
+        ],
+        "relevant_statistics": {{
+            "metric_name": numeric_value,
+            "percentage_insight": numeric_value,
+            "comparison_metric": numeric_value
+        }},
+        "actionable_insights": [
+            "Specific recommendation based on data analysis",
+            "Strategic action item with clear business value",
+            "Operational improvement suggestion"
+        ],
+        "data_evidence": [
+            "Specific data point supporting the analysis",
+            "Statistical evidence for key findings",
+            "Data source reference for validation"
+        ],
+        "confidence_level": "high|medium|low",
+        "follow_up_questions": [
+            "Relevant question to explore deeper insights",
+            "Related business question for further analysis"
+        ]
+    }}
+    ```
+
+    ## QUALITY CHECKLIST
+    - ✓ All statistics reference the provided data
+    - ✓ Business domain context is incorporated
+    - ✓ Insights are specific and actionable
+    - ✓ Evidence supports every claim
+    - ✓ JSON format is valid and complete
+    """
         return prompt
     
     def parse_rag_response(self, response_text, original_question):
@@ -1609,19 +1657,26 @@ def format_response_structure(rag_result):
         "followUpQuestions": rag_result.get('follow_up_questions', [])
     }
 def generate_dashboard_insights(df, schema_analysis):
-    """Generate comprehensive dashboard insights using Gemini AI"""
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        client = openai.OpenAI(api_key=OPENAI_API_KEY)
         
         # Create comprehensive data context
         data_context = create_dashboard_context(df, schema_analysis)
         
-        # Generate insights using Gemini
+        # Generate insights using OpenAI
         prompt = create_dashboard_prompt(data_context)
-        response = model.generate_content(prompt)
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a Business Intelligence Dashboard Generator."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=2000
+        )
         
         # Parse AI response and combine with calculated metrics
-        ai_insights = parse_dashboard_response(response.text)
+        ai_insights = parse_dashboard_response(response.choices[0].message.content)
         calculated_metrics = calculate_dashboard_metrics(df, schema_analysis)
         
         # Merge AI insights with calculated data
@@ -1629,9 +1684,23 @@ def generate_dashboard_insights(df, schema_analysis):
         
         return dashboard_data
         
+    except openai.error.RateLimitError:
+        print("OpenAI rate limit exceeded for dashboard generation")
+        return generate_fallback_dashboard(df, schema_analysis)
+    except openai.error.AuthenticationError:
+        print("OpenAI authentication failed for dashboard generation")
+        return generate_fallback_dashboard(df, schema_analysis)
+    except openai.error.InvalidRequestError as e:
+        print(f"Invalid OpenAI request for dashboard: {str(e)}")
+        return generate_fallback_dashboard(df, schema_analysis)
+    except openai.error.APIConnectionError:
+        print("Failed to connect to OpenAI API for dashboard generation")
+        return generate_fallback_dashboard(df, schema_analysis)
+    except openai.error.APIError as e:
+        print(f"OpenAI API error for dashboard: {str(e)}")
+        return generate_fallback_dashboard(df, schema_analysis)
     except Exception as e:
-        print(f"Gemini dashboard generation failed: {str(e)}")
-        # Fallback to rule-based dashboard generation
+        print(f"OpenAI dashboard generation failed: {str(e)}")
         return generate_fallback_dashboard(df, schema_analysis)
 
 def filter_meaningful_columns(df):
@@ -1789,58 +1858,73 @@ def create_dashboard_context(df, schema_analysis):
     }
 
 def create_dashboard_prompt(data_context):
-    """Create AI prompt for dashboard insights generation"""
-    return f"""
-You are a Business Intelligence Dashboard Generator. Analyze the provided dataset and generate comprehensive dashboard insights.
+    return f"""You are a Senior Business Intelligence Consultant creating executive dashboard insights. Your analysis will directly inform strategic business decisions.
 
-BUSINESS CONTEXT:
-- Domain: {data_context['metadata']['business_domain']}
-- Entity: {data_context['metadata']['primary_entity']} 
-- Records: {data_context['metadata']['total_records']:,}
-- Columns: {data_context['metadata']['total_columns']}
-- Data Quality: {data_context['metadata']['data_completeness']:.1f}% complete
+## EXECUTIVE SUMMARY
+**Business Domain**: {data_context['metadata']['business_domain']}
+**Primary Business Entity**: {data_context['metadata']['primary_entity']}
+**Data Scale**: {data_context['metadata']['total_records']:,} records
+**Data Reliability**: {data_context['metadata']['data_completeness']:.1f}% complete
 
-STATISTICAL DATA:
-{json.dumps(data_context['statistical_summary'], indent=2)}
+## PERFORMANCE METRICS
+{json.dumps(data_context['statistical_summary'], indent=2) if data_context['statistical_summary'] else "No quantitative metrics available"}
 
-CATEGORICAL DATA:
-{json.dumps(data_context['categorical_insights'], indent=2)}
+## BUSINESS SEGMENTS
+{json.dumps(data_context['categorical_insights'], indent=2) if data_context['categorical_insights'] else "No segmentation data available"}
 
-SAMPLE RECORDS:
-{json.dumps(data_context['sample_data'], indent=2)}
+## OPERATIONAL DATA SAMPLE
+```json
+{json.dumps(data_context['sample_data'][:5], indent=2)}
+```
 
-Generate business dashboard insights in JSON format:
+---
 
+## DASHBOARD REQUIREMENTS
+
+Generate strategic business insights formatted as JSON:
+
+```json
 {{
     "primaryInsights": [
-        "Key insight about business domain and data patterns",
-        "Data quality and completeness insight", 
-        "Business value and opportunity insight",
-        "Domain-specific trend or pattern insight"
+        "Executive-level insight about business performance and opportunities",
+        "Data quality insight affecting decision-making reliability", 
+        "Market positioning or competitive advantage insight from the data",
+        "Operational efficiency or resource optimization finding",
+        "Risk assessment or business threat identification"
     ],
     "actionableInsights": [
-        "Specific actionable recommendation based on data",
-        "Strategy suggestion for business improvement",
-        "Data-driven decision making recommendation"
+        "Immediate strategic action with clear ROI potential",
+        "Operational improvement with measurable impact",
+        "Market opportunity with specific next steps",
+        "Risk mitigation strategy based on data patterns"
     ],
     "nextSteps": [
-        "Immediate action item based on findings",
-        "Long-term strategic recommendation",
-        "Data analysis or collection suggestion"
+        "Priority action item for the next 30 days",
+        "Strategic initiative for next quarter",
+        "Data collection or analysis improvement needed",
+        "Process optimization recommendation"
     ]
 }}
+```
 
-Focus on:
-1. Business domain-specific insights (not just generic data observations)
-2. Actionable recommendations that can drive business value
-3. Specific patterns or trends visible in the actual data
-4. Data quality insights that impact business decisions
+## ANALYSIS FRAMEWORK
+1. **Strategic Impact**: Focus on insights that affect revenue, costs, or competitive position
+2. **Measurable Outcomes**: Quantify opportunities and risks where possible
+3. **Actionability**: Every insight should connect to specific business actions
+4. **Executive Perspective**: Frame findings for C-level decision makers
+5. **Data-Driven**: Ground recommendations in actual data patterns
 
-Be specific and avoid generic statements. Use actual data values and percentages where relevant.
+## BUSINESS CONTEXT REQUIREMENTS
+- Address domain-specific KPIs and success metrics
+- Consider industry benchmarks and best practices
+- Identify growth opportunities and efficiency gains
+- Highlight data-driven competitive advantages
+- Assess operational risks and mitigation strategies
+
+Generate insights that transform raw data into strategic business intelligence.
 """
 
 def parse_dashboard_response(response_text):
-    """Parse Gemini response for dashboard insights"""
     try:
         clean_response = response_text.strip()
         if clean_response.startswith('```json'):
@@ -2629,5 +2713,3 @@ def pattern_analysis_analyze():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
-
-
