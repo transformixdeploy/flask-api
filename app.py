@@ -1435,77 +1435,62 @@ class SmartRAGAssistant:
             return self.fallback_answer(question, str(e))
         
     def create_rag_prompt(self, question, data_context):
-        prompt = f"""You are an expert Business Intelligence Analyst with access to a comprehensive dataset. Analyze the data thoroughly and provide actionable insights.
-    ## DATASET OVERVIEW
-    **Business Domain**: {data_context['metadata']['business_domain']}
-    **Primary Entity**: {data_context['metadata']['primary_entity']}
-    **Dataset Size**: {data_context['metadata']['total_records']:,} records across {len(data_context['metadata']['columns'])} columns
-    **Data Quality**: {(data_context['data_quality']['completeness']):.1f}% complete
-    ## AVAILABLE DATA FIELDS
-    **Columns**: {', '.join(data_context['metadata']['columns'])}
-    ## STATISTICAL INSIGHTS
-    {json.dumps(data_context['statistical_summary'], indent=2) if data_context['statistical_summary'] else "No numerical data available"}
-    ## CATEGORICAL PATTERNS
-    {json.dumps(data_context['categorical_insights'], indent=2) if data_context['categorical_insights'] else "No categorical patterns identified"}
-    ## COMBINED FIELD ANALYSIS (Products, Tags, Purchase History)
-    {json.dumps(data_context['combined_fields_analysis'], indent=2) if data_context['combined_fields_analysis'] else "No combined field patterns detected"}
-    ## DATA QUALITY ASSESSMENT
-    - **Missing Values**: {data_context['data_quality']['missing_by_column']}
-    - **Duplicate Records**: {data_context['data_quality']['duplicate_rows']}
-    - **Overall Completeness**: {data_context['data_quality']['completeness']:.1f}%
-    ## SAMPLE RECORDS
-    ```json
-    {json.dumps(data_context['sample_data'][:3], indent=2)}
-    ```
-    ---
-    ## USER QUESTION
-    "{question}"
-    ## ANALYSIS INSTRUCTIONS
-    1. **Data Consistency**: Reference ONLY the data provided above. Do not perform separate calculations.
-    2. **Business Context**: Frame insights within the {data_context['metadata']['business_domain']} domain.
-    3. **Evidence-Based**: Support every claim with specific data points from the provided statistics.
-    4. **Actionable Focus**: Prioritize insights that can drive business decisions.
-    5. **Pattern Recognition**: Identify trends, outliers, and correlations in the data.
-    ## RESPONSE FORMAT
-    Respond with a properly formatted JSON object:
-    ```json
-    {{
-        "analysis": "Comprehensive answer addressing the specific question with concrete data insights and business implications",
-        "confidence": 0.85,
-        "key_findings": [
-            "Specific finding with actual numbers/percentages",
-            "Pattern identified in the data",
-            "Significant trend or correlation"
-        ],
-        "relevant_statistics": {{
-            "metric_name": numeric_value,
-            "percentage_insight": numeric_value,
-            "comparison_metric": numeric_value
-        }},
-        "actionable_insights": [
-            "Specific recommendation based on data analysis",
-            "Strategic action item with clear business value",
-            "Operational improvement suggestion"
-        ],
-        "data_evidence": [
-            "Specific data point supporting the analysis",
-            "Statistical evidence for key findings",
-            "Data source reference for validation"
-        ],
-        "confidence_level": "high|medium|low",
-        "follow_up_questions": [
-            "Relevant question to explore deeper insights",
-            "Related business question for further analysis"
-        ]
-    }}
-    ```
-    ## QUALITY CHECKLIST
-    - ✓ All statistics reference the provided data
-    - ✓ Business domain context is incorporated
-    - ✓ Insights are specific and actionable
-    - ✓ Evidence supports every claim
-    - ✓ JSON format is valid and complete
-    """
+        prompt = f"""
+You are a Smart Business Intelligence Assistant with direct access to the following dataset:
+
+BUSINESS CONTEXT:
+- Domain: {data_context['metadata']['business_domain']}
+- Entity Type: {data_context['metadata']['primary_entity']}
+- Total Records: {data_context['metadata']['total_records']:,}
+- Columns: {', '.join(data_context['metadata']['columns'])}
+
+STATISTICAL SUMMARY:
+{json.dumps(data_context['statistical_summary'], indent=2)}
+
+CATEGORICAL DATA INSIGHTS:
+{json.dumps(data_context['categorical_insights'], indent=2)}
+
+COMBINED FIELDS ANALYSIS (Products, Tags, etc.):
+{json.dumps(data_context['combined_fields_analysis'], indent=2)}
+
+IMPORTANT: When analyzing combined fields, use the data provided above consistently:
+- For individual item popularity: Use 'individual_items' -> 'top_10_individual_items'
+- For combination patterns: Use 'combination_patterns' -> 'top_10_combinations'
+- Always reference the SAME data source to avoid contradictions
+
+DATA QUALITY METRICS:
+{json.dumps(data_context['data_quality'], indent=2)}
+
+SAMPLE DATA (First {len(data_context['sample_data'])} records):
+{json.dumps(data_context['sample_data'], indent=2)}
+
+USER QUESTION: "{question}"
+
+Instructions:
+1. Pay special attention to COMBINED FIELDS ANALYSIS - this contains both individual items AND combination patterns
+2. For individual products: Use the 'individual_items' section
+3. For product combinations: Use the 'combination_patterns' section
+4. ALWAYS reference the exact same data shown above - don't perform separate analysis
+5. Be consistent with naming and counts across different questions
+6. Provide specific, data-driven answers based on the actual dataset
+7. Include relevant statistics, trends, and patterns
+8. If you need to make assumptions, state them clearly
+
+Respond in JSON format:
+{{
+    "analysis": "Detailed answer to the user's question",
+    "confidence": 0.85,
+    "key_findings": ["Finding 1", "Finding 2", "Finding 3"],
+    "relevant_statistics": {{"stat_name": "value", "description": "explanation"}},
+    "actionable_insights": ["Insight 1", "Insight 2"],
+    "data_evidence": ["Evidence 1", "Evidence 2"],
+    "confidence_level": "high",
+    "follow_up_questions": ["Question 1", "Question 2"]
+}}
+
+Be specific, use actual data values, and provide concrete insights based on the dataset provided.
+"""
+        
         return prompt
     
     def parse_rag_response(self, response_text, original_question):
