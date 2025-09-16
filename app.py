@@ -1829,6 +1829,7 @@ def create_dashboard_context(df, schema_analysis):
         "sample_data": df.head(5).to_dict('records')
     }
 
+
 def create_dashboard_prompt(data_context):
     return f"""You are a Senior Business Intelligence Consultant creating executive dashboard insights. Your analysis will directly inform strategic business decisions.
 
@@ -2092,7 +2093,8 @@ def merge_dashboard_data(ai_insights, calculated_metrics, df, schema_analysis):
             "actionableInsights": ai_insights.get("actionableInsights", []),
             "nextSteps": ai_insights.get("nextSteps", [])
         },
-        "analytics": generate_analytics_summary(df)
+        "analytics": generate_analytics_summary(df),
+        **build_dashboard_charts(df, schema_analysis)
     }
 
 def generate_fallback_dashboard(df, schema_analysis):
@@ -2157,7 +2159,7 @@ def generate_fallback_insights_full(df, schema_analysis):
     insights = generate_fallback_insights(df, schema_analysis)
     metrics = calculate_dashboard_metrics(df, schema_analysis)
     
-    return {
+    base = {
         "keyBusinessInsights": {
             "primaryInsights": insights["primaryInsights"],
             "quickStats": generate_quick_stats(df, schema_analysis)
@@ -2169,6 +2171,144 @@ def generate_fallback_insights_full(df, schema_analysis):
         },
         "analytics": generate_analytics_summary(df)
     }
+    # Append charts to the fallback payload as well
+    base.update(build_dashboard_charts(df, schema_analysis))
+    return base
+
+def build_dashboard_charts(df, schema_analysis):
+    """Create line, bar, pie, and donut chart data with sensible defaults.
+
+    Returns a dict with keys expected by the frontend: lineChart, lineChartData, barChart, barChartData,
+    pieChart, pieChartData, donutChart, donutChartData. String booleans per spec.
+    """
+    try:
+        # Use meaningful columns to avoid IDs and similar
+        meaningful_cols = filter_meaningful_columns(df)
+        working_df = df[meaningful_cols]
+
+        # Identify candidate columns
+        numeric_cols = list(working_df.select_dtypes(include=[np.number]).columns)
+        text_cols = list(working_df.select_dtypes(include=['object', 'string']).columns)
+
+        # Helper: choose categorical column with reasonable cardinality
+        def pick_categorical(max_unique=20):
+            best_col = None
+            best_unique = None
+            for col in text_cols:
+                try:
+                    uniq = working_df[col].nunique(dropna=True)
+                except Exception:
+                    continue
+                if 2 <= uniq <= max_unique:
+                    if best_unique is None or uniq < best_unique:
+                        best_col = col
+                        best_unique = uniq
+            # Fallback: pick the text col with the lowest unique count > 1
+            if not best_col:
+                low_col = None
+                low_uniq = None
+                for col in text_cols:
+                    try:
+                        uniq = working_df[col].nunique(dropna=True)
+                    except Exception:
+                        continue
+                    if uniq > 1 and (low_uniq is None or uniq < low_uniq):
+                        low_col = col
+                        low_uniq = uniq
+                return low_col
+            return best_col
+
+        # Helper: attempt to pick a date-like column
+        def pick_date_col():
+            date_hints = [c for c in working_df.columns if any(h in c.lower() for h in ["date", "time", "day", "month", "year"])]
+            for col in date_hints:
+                try:
+                    parsed = pd.to_datetime(working_df[col], errors='coerce')
+                    if parsed.notna().sum() >= max(5, int(0.1 * len(working_df))):
+                        return col
+                except Exception:
+                    continue
+            return None
+
+        # Colors palette
+        palette = [
+            "#8884d8", "#82ca9d", "#ffc658", "#ff8042", "#8dd1e1",
+            "#a4de6c", "#d0ed57", "#d88484", "#84d8c6", "#c6a4de"
+        ]
+
+        # Build Bar/Pie/Donut from categorical frequencies
+        cat_col = pick_categorical(max_unique=15)
+        bar_pie_data = []
+        if cat_col is not None:
+            vc = working_df[cat_col].astype(str).str.strip()
+            vc = vc[vc != ""].value_counts().head(10)
+            bar_pie_data = [{"name": str(k), "value": int(v)} for k, v in vc.items()]
+
+        # Build Line from date grouping or numeric histogram
+        line_data = []
+        date_col = pick_date_col()
+        if date_col is not None:
+            parsed = pd.to_datetime(working_df[date_col], errors='coerce')
+            grp = parsed.dropna().dt.to_period('M').value_counts().sort_index()
+            # Use monthly counts; fallback to daily if few months
+            if len(grp) < 3:
+                grp = parsed.dropna().dt.date
+                grp = pd.Series(grp).value_counts().sort_index()
+            line_data = [{"name": str(idx), "value": int(val)} for idx, val in list(grp.items())[:20]]
+        elif numeric_cols:
+            # Histogram of first numeric column
+            col = numeric_cols[0]
+            series = working_df[col].dropna()
+            if not series.empty:
+                try:
+                    counts, bins = np.histogram(series, bins=10)
+                    for i in range(min(10, len(counts))):
+                        left = bins[i]
+                        right = bins[i+1]
+                        name = f"{round(float(left), 2)}–{round(float(right), 2)}"
+                        line_data.append({"name": name, "value": int(counts[i])})
+                except Exception:
+                    pass
+
+        # Assemble outputs with required string booleans
+        charts = {
+            "lineChart": "true",
+            "lineChartData": {
+                "title": (cat_col or "Trend") if date_col else (numeric_cols[0] if numeric_cols else "Trend"),
+                "data": line_data if line_data else ([{"name": "No Data", "value": 0}])
+            },
+            "barChart": "true",
+            "barChartData": {
+                "title": cat_col or "Category",
+                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 0}])
+            },
+            "pieChart": "true",
+            "pieChartData": {
+                "title": cat_col or "Category Share",
+                "colorCodes": palette[:max(1, len(bar_pie_data))] if bar_pie_data else palette[:1],
+                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 1}])
+            },
+            "donutChart": "true",
+            "donutChartData": {
+                "title": cat_col or "Category Share",
+                "colorCodes": palette[:max(1, len(bar_pie_data))] if bar_pie_data else palette[:1],
+                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 1}])
+            }
+        }
+
+        return charts
+    except Exception:
+        # Robust fallback structure
+        return {
+            "lineChart": "true",
+            "lineChartData": {"title": "Trend", "data": [{"name": "No Data", "value": 0}]},
+            "barChart": "true",
+            "barChartData": {"title": "Category", "data": [{"name": "No Data", "value": 0}]},
+            "pieChart": "true",
+            "pieChartData": {"title": "Category Share", "colorCodes": ["#8884d8"], "data": [{"name": "No Data", "value": 1}]},
+            "donutChart": "true",
+            "donutChartData": {"title": "Category Share", "colorCodes": ["#8884d8"], "data": [{"name": "No Data", "value": 1}]}
+        }
 @app.route('/ai/upload', methods=['POST'])
 def upload():
     try:
