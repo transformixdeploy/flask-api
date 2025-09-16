@@ -823,7 +823,7 @@ class SmartRAGAssistant:
                 if any(sep in str(val) for val in sample_values):
                     separators_found.append(sep)
             
-            field_indicators = ['history', 'products', 'items', 'tags', 'categories', 'skills', 'interests', 'purchase']
+            field_indicators = ['history', 'products', 'items', 'tags', 'categories', 'skills', 'interests', 'purchase', 'course', 'courses', 'specialty', 'specialties', 'certification', 'certifications', 'class', 'classes', 'training', 'lesson', 'lessons']
             if any(indicator in col.lower() for indicator in field_indicators) or separators_found:
                 separator_counts = {}
                 for sep in separators_found:
@@ -1026,10 +1026,10 @@ class SmartRAGAssistant:
     def handle_specific_question_types(self, question):
         question_lower = question.lower()
         
-        product_keywords = ['product', 'item', 'purchase', 'bought', 'buy', 'sold', 'selling', 'offer', 'provide', 'sell']
+        product_keywords = ['product', 'item', 'purchase', 'purchased', 'bought', 'buy', 'sold', 'selling', 'offer', 'provide', 'sell', 'course', 'courses', 'specialty', 'specialties', 'certification', 'certifications', 'class', 'classes', 'training', 'lesson', 'lessons', 'program', 'module']
         ranking_keywords = ['most', 'popular', 'common', 'frequent', 'top', 'best']
         combination_keywords = ['combination', 'combo', 'together', 'bundle', 'pair', 'group', 'set']
-        unique_keywords = ['unique', 'different', 'distinct', 'variety', 'types', 'kinds', 'catalog', 'range']
+        unique_keywords = ['unique', 'different', 'distinct', 'variety', 'types', 'kinds', 'catalog', 'range', 'offered', 'available']
         
         is_product_question = any(keyword in question_lower for keyword in product_keywords)
         is_ranking_question = any(keyword in question_lower for keyword in ranking_keywords)
@@ -1069,15 +1069,7 @@ class SmartRAGAssistant:
                 ]
             }
         
-        product_field = None
-        for field_name in combined_fields.keys():
-            field_lower = field_name.lower()
-            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order', 'history']):
-                product_field = field_name
-                break
-        
-        if not product_field:
-            product_field = list(combined_fields.keys())[0]
+        product_field = self.select_best_combined_field(combined_fields, question)
         
         parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
         
@@ -1187,15 +1179,7 @@ class SmartRAGAssistant:
                 ]
             }
         
-        product_field = None
-        for field_name in combined_fields.keys():
-            field_lower = field_name.lower()
-            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order']):
-                product_field = field_name
-                break
-        
-        if not product_field:
-            product_field = list(combined_fields.keys())[0]
+        product_field = self.select_best_combined_field(combined_fields, question)
         
         # Parse the field
         parsed_data = self.parse_combined_field(product_field, combined_fields[product_field]['separator'])
@@ -1292,15 +1276,7 @@ class SmartRAGAssistant:
                 ]
             }
         
-        combination_field = None
-        for field_name in combined_fields.keys():
-            field_lower = field_name.lower()
-            if any(indicator in field_lower for indicator in ['purchase', 'product', 'item', 'buy', 'order', 'history']):
-                combination_field = field_name
-                break
-        
-        if not combination_field:
-            combination_field = list(combined_fields.keys())[0]
+        combination_field = self.select_best_combined_field(combined_fields, question)
         
         combined_analysis = self.get_combined_fields_analysis()
         
@@ -1397,6 +1373,49 @@ class SmartRAGAssistant:
                 "Which combinations have the highest profit margins?"
             ]
         }
+    
+    def select_best_combined_field(self, combined_fields, question):
+        """Select the most relevant combined field based on the question and data richness.
+        Prefers course-like columns when the question mentions courses, certifications, or specialties.
+        Otherwise uses product/purchase indicators and falls back to the richest field.
+        """
+        if not combined_fields:
+            return None
+        q = (question or '').lower()
+        priority_keywords = [
+            # Highest priority: course-related
+            ('courses', 5), ('course', 5), ('specialties', 5), ('specialty', 5),
+            ('certifications', 5), ('certification', 5), ('class', 4), ('classes', 4),
+            ('training', 4), ('lesson', 3), ('lessons', 3),
+            # Product-related
+            ('purchase', 3), ('purchased', 3), ('product', 3), ('item', 3), ('buy', 3), ('order', 3), ('history', 2)
+        ]
+        # Score fields by name relevance
+        field_scores = {}
+        for field_name in combined_fields.keys():
+            score = 0
+            lower = field_name.lower()
+            for kw, pts in priority_keywords:
+                if kw in q and kw.rstrip('s') in lower:
+                    score += pts
+                if kw in lower:
+                    score += 1  # mild boost if field name contains keyword
+            field_scores[field_name] = score
+        # If any field has a positive score, pick the highest
+        best_field = max(field_scores, key=lambda k: field_scores[k]) if field_scores else None
+        if best_field and field_scores[best_field] > 0:
+            return best_field
+        
+        # Otherwise, pick the richest field by number of parsed individual items
+        richest_field = None
+        richest_count = -1
+        for field_name, info in combined_fields.items():
+            parsed = self.parse_combined_field(field_name, info.get('separator', ','))
+            count = parsed['total_individual_items'] if parsed else 0
+            if count > richest_count:
+                richest_count = count
+                richest_field = field_name
+        return richest_field or list(combined_fields.keys())[0]
     
     def answer_question(self, question):
         try:
