@@ -2561,7 +2561,32 @@ def smart_question_example():
 
         # Use only meaningful columns (exclude IDs and similar) to avoid unhelpful questions
         meaningful_cols = filter_meaningful_columns(df)
-        df_meaningful = df[meaningful_cols]
+        # Additional pruning specific for smart questions: remove phones/emails and overly-unique text fields
+        additional_excluded = set()
+        phone_email_keywords = [
+            'phone', 'mobile', 'telephone', 'tel', 'whatsapp', 'fax',
+            'contact', 'contact_no', 'contact_number', 'email', 'e-mail'
+        ]
+        for col in meaningful_cols:
+            lower = col.lower().strip()
+            if any(k in lower for k in phone_email_keywords):
+                additional_excluded.add(col)
+                continue
+            # Exclude highly-unique text columns (likely identifiers or free text not good for suggestions)
+            try:
+                if df[col].dtype in ['object', 'string']:
+                    total = len(df)
+                    if total > 0:
+                        uniq_ratio = df[col].nunique(dropna=True) / total
+                        if uniq_ratio > 0.95:
+                            additional_excluded.add(col)
+                            continue
+            except Exception:
+                pass
+
+        pruned_cols = [c for c in meaningful_cols if c not in additional_excluded]
+        # Ensure at least one column remains
+        df_meaningful = df[pruned_cols] if pruned_cols else df[meaningful_cols]
 
         schema_analyzer = DataSchemaAnalyzer(df_meaningful)
         schema_analysis = schema_analyzer.analyze_schema()
