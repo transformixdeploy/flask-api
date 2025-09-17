@@ -2212,6 +2212,29 @@ def build_dashboard_charts(df, schema_analysis):
         numeric_cols = list(working_df.select_dtypes(include=[np.number]).columns)
         text_cols = list(working_df.select_dtypes(include=['object', 'string']).columns)
 
+        # Exclude unhelpful text columns for categorical charts (phones/emails etc.)
+        unhelpful_text_keywords = [
+            'phone', 'mobile', 'telephone', 'tel', 'whatsapp', 'fax',
+            'contact', 'contact_no', 'contact_number', 'email', 'e-mail'
+        ]
+        filtered_text_cols = []
+        for col in text_cols:
+            lower = col.lower().strip()
+            if any(k in lower for k in unhelpful_text_keywords):
+                continue
+            # Skip extremely high uniqueness text columns (>95%) and very sparse columns (<10% non-null)
+            try:
+                total = len(working_df)
+                non_null = working_df[col].notna().sum()
+                if total > 0 and (non_null / total) < 0.1:
+                    continue
+                uniq_ratio = working_df[col].nunique(dropna=True) / total if total else 1
+                if uniq_ratio > 0.95:
+                    continue
+            except Exception:
+                pass
+            filtered_text_cols.append(col)
+
         # Helper: choose categorical column with reasonable cardinality
         def pick_categorical(max_unique=20):
             best_col = None
@@ -2301,14 +2324,19 @@ def build_dashboard_charts(df, schema_analysis):
 
         # Build distinct categorical charts (bar, pie, donut) using different columns
         def build_cat_data(col_name):
-            vc = working_df[col_name].astype(str).str.strip()
-            vc = vc[vc != ""].value_counts().head(10)
+            series = working_df[col_name]
+            series = series.dropna()
+            series = series.astype(str).str.strip()
+            series = series[series != ""]
+            # Guard against 'nan' strings from previous conversions
+            series = series[series.str.lower() != 'nan']
+            vc = series.value_counts().head(10)
             return [{"name": str(k), "value": int(v)} for k, v in vc.items()]
 
         # Gather up to 3 distinct categorical columns
         categorical_choices = []
-        # Prefer reasonable cardinality first
-        for col in text_cols:
+        # Prefer reasonable cardinality first from filtered set
+        for col in filtered_text_cols:
             try:
                 uniq = working_df[col].nunique(dropna=True)
             except Exception:
@@ -2318,7 +2346,7 @@ def build_dashboard_charts(df, schema_analysis):
         # If too few, add additional lowest-uniqueness columns (>1)
         if len(categorical_choices) < 3:
             extras = []
-            for col in text_cols:
+            for col in filtered_text_cols:
                 if any(col == c for c, _ in categorical_choices):
                     continue
                 try:
