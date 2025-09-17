@@ -2212,10 +2212,15 @@ def build_dashboard_charts(df, schema_analysis):
         numeric_cols = list(working_df.select_dtypes(include=[np.number]).columns)
         text_cols = list(working_df.select_dtypes(include=['object', 'string']).columns)
 
-        # Exclude unhelpful text columns for categorical charts (phones/emails etc.)
+        # Exclude unhelpful text columns for categorical charts (phones/emails/names etc.)
         unhelpful_text_keywords = [
             'phone', 'mobile', 'telephone', 'tel', 'whatsapp', 'fax',
-            'contact', 'contact_no', 'contact_number', 'email', 'e-mail'
+            'contact', 'contact_no', 'contact_number', 'email', 'e-mail',
+            # Names
+            'name', 'first_name', 'firstname', 'last_name', 'lastname', 'full_name', 'fullname',
+            'givenname', 'surename', 'surname', 'family name', 'arabic name',
+            # Other often-unhelpful free-text PII or boilerplate
+            'address', 'notes', 'note', 'comment', 'comments', 'description', 'remark', 'remarks'
         ]
         filtered_text_cols = []
         for col in text_cols:
@@ -2231,6 +2236,18 @@ def build_dashboard_charts(df, schema_analysis):
                 uniq_ratio = working_df[col].nunique(dropna=True) / total if total else 1
                 if uniq_ratio > 0.95:
                     continue
+                # Skip columns dominated by a single value (>90%)
+                vc_preview = (
+                    working_df[col]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                )
+                vc_preview = vc_preview[vc_preview != ""]
+                if len(vc_preview) > 0:
+                    counts = vc_preview.value_counts()
+                    if counts.sum() > 0 and (counts.iloc[0] / counts.sum()) > 0.9:
+                        continue
             except Exception:
                 pass
             filtered_text_cols.append(col)
@@ -2283,26 +2300,11 @@ def build_dashboard_charts(df, schema_analysis):
 
         used_columns = set()
 
-        # Try AI-assisted column selection first
-        ai_choice = None
-        try:
-            ai_choice = choose_chart_columns_with_ai(working_df, schema_analysis, numeric_cols, filtered_text_cols)
-        except Exception:
-            ai_choice = None
-
         # Build Line from date grouping or numeric histogram (unique source)
         line_enabled = False
         line_title = "Trend"
         line_data = []
-        date_col = None
-        # Prefer AI date/series suggestion if valid and distinct
-        if ai_choice and ai_choice.get('line'):
-            candidate = ai_choice['line']
-            if candidate in working_df.columns and candidate not in used_columns:
-                date_col = candidate if any(h in candidate.lower() for h in ["date", "time", "day", "month", "year"]) else None
-                # If AI suggested numeric series for line, we'll use histogram later
-        if date_col is None:
-            date_col = pick_date_col()
+        date_col = pick_date_col()
         if date_col is not None:
             try:
                 parsed = pd.to_datetime(working_df[date_col], errors='coerce')
@@ -2319,10 +2321,7 @@ def build_dashboard_charts(df, schema_analysis):
                 pass
         if not line_enabled and numeric_cols:
             # Histogram of first numeric column not used
-            hist_preferred = None
-            if ai_choice and ai_choice.get('line') and ai_choice['line'] in numeric_cols and ai_choice['line'] not in used_columns:
-                hist_preferred = ai_choice['line']
-            hist_col = hist_preferred or next((c for c in numeric_cols if c not in used_columns), None)
+            hist_col = next((c for c in numeric_cols if c not in used_columns), None)
             if hist_col is not None:
                 series = working_df[hist_col].dropna()
                 if not series.empty:
@@ -2379,21 +2378,6 @@ def build_dashboard_charts(df, schema_analysis):
 
         # Filter out any already used columns
         categorical_choices = [c for c in categorical_choices if c[0] not in used_columns]
-
-        # If AI suggested categories, move them to the front in order and ensure distinct
-        if ai_choice:
-            suggested = [ai_choice.get('bar'), ai_choice.get('pie'), ai_choice.get('donut')]
-            ordered = []
-            seen = set()
-            for s in suggested:
-                if s and s in filtered_text_cols and s not in used_columns and s not in seen:
-                    ordered.append((s, working_df[s].nunique(dropna=True)))
-                    seen.add(s)
-            # Add remaining choices after AI suggestions
-            for c in categorical_choices:
-                if c[0] not in seen:
-                    ordered.append(c)
-            categorical_choices = ordered
 
         # Assign unique columns to bar, pie, donut in order
         bar_enabled = False
@@ -2477,73 +2461,6 @@ def build_dashboard_charts(df, schema_analysis):
             "donutChart": "true",
             "donutChartData": {"title": "Category Share", "colorCodes": ["#8884d8"], "data": [{"name": "No Data", "value": 1}]}
         }
-
-def choose_chart_columns_with_ai(working_df, schema_analysis, numeric_cols, categorical_text_cols):
-    """Ask Claude to select the best distinct columns for charts. Returns a dict
-    like {"line": <col>, "bar": <col>, "pie": <col>, "donut": <col>} or {}.
-
-    The assistant will be constrained by passing only eligible candidate columns
-    and a compact data preview to reduce cost.
-    """
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-        meta = {
-            "domain": schema_analysis.get('business_domain', 'general business'),
-            "entity": schema_analysis.get('primary_entity', 'record'),
-            "numRows": int(len(working_df)),
-            "numCols": int(len(working_df.columns)),
-            "numericCandidates": numeric_cols[:10],
-            "categoricalCandidates": categorical_text_cols[:20]
-        }
-
-        # Lightweight per-column summary
-        summaries = {}
-        for col in list(working_df.columns)[:50]:
-            try:
-                non_null = int(working_df[col].notna().sum())
-                uniq = int(working_df[col].nunique(dropna=True))
-                dtype = str(working_df[col].dtype)
-                summaries[col] = {"nonNull": non_null, "unique": uniq, "dtype": dtype}
-            except Exception:
-                continue
-
-        sample = working_df.head(3).to_dict('records')
-
-        prompt = (
-            "You are selecting the most meaningful DISTINCT columns to build charts for a business dashboard.\n"
-            "- Use a date/time column for the line chart if available; otherwise recommend ONE numeric column for histogram.\n"
-            "- For bar, pie, and donut, choose THREE DIFFERENT categorical text columns with good usefulness (not contact info, not IDs, moderate uniqueness).\n"
-            "Return strict JSON with keys line, bar, pie, donut and a reasons array.\n"
-            f"METADATA: {json.dumps(meta)}\n"
-            f"SUMMARIES: {json.dumps(summaries)}\n"
-            f"SAMPLE: {json.dumps(sample)}\n"
-            "JSON format: {\"line\": \"col_name_or_empty\", \"bar\": \"\", \"pie\": \"\", \"donut\": \"\", \"reasons\": [\"...\"]}"
-        )
-
-        resp = client.messages.create(
-            model="claude-3-5-haiku-latest",
-            max_tokens=1000,
-            temperature=0.2,
-            system="You choose chart columns that maximize business insight and avoid unhelpful fields.",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        text = resp.content[0].text if resp and resp.content else "{}"
-        # Extract JSON inside fences if present
-        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
-        payload = m.group(1).strip() if m else text.strip()
-        data = json.loads(payload)
-
-        result = {}
-        for key in ["line", "bar", "pie", "donut"]:
-            val = data.get(key)
-            if isinstance(val, str) and val in working_df.columns:
-                result[key] = val
-
-        return result
-    except Exception:
-        return {}
 @app.route('/ai/upload', methods=['POST'])
 def upload():
     try:
