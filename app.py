@@ -2427,39 +2427,39 @@ def build_dashboard_charts(df, schema_analysis):
             "lineChart": "true" if line_enabled else "false",
             "lineChartData": {
                 "title": line_title,
-                "data": line_data if line_data else ([{"name": "No Data", "value": 0}])
+                "data": line_data if line_data else []
             },
             "barChart": "true" if bar_enabled else "false",
             "barChartData": {
                 "title": bar_title,
-                "data": bar_data if bar_data else ([{"name": "No Data", "value": 0}])
+                "data": bar_data if bar_data else []
             },
             "pieChart": "true" if pie_enabled else "false",
             "pieChartData": {
                 "title": pie_title,
-                "colorCodes": palette[:max(1, len(pie_data))] if pie_data else palette[:1],
-                "data": pie_data if pie_data else ([{"name": "No Data", "value": 1}])
+                "colorCodes": palette[:max(1, len(pie_data))] if pie_data else [],
+                "data": pie_data if pie_data else []
             },
             "donutChart": "true" if donut_enabled else "false",
             "donutChartData": {
                 "title": donut_title,
-                "colorCodes": palette[:max(1, len(donut_data))] if donut_data else palette[:1],
-                "data": donut_data if donut_data else ([{"name": "No Data", "value": 1}])
+                "colorCodes": palette[:max(1, len(donut_data))] if donut_data else [],
+                "data": donut_data if donut_data else []
             }
         }
 
         return charts
     except Exception:
-        # Robust fallback structure
+        # Robust fallback structure: disable charts when no valid data
         return {
-            "lineChart": "true",
-            "lineChartData": {"title": "Trend", "data": [{"name": "No Data", "value": 0}]},
-            "barChart": "true",
-            "barChartData": {"title": "Category", "data": [{"name": "No Data", "value": 0}]},
-            "pieChart": "true",
-            "pieChartData": {"title": "Category Share", "colorCodes": ["#8884d8"], "data": [{"name": "No Data", "value": 1}]},
-            "donutChart": "true",
-            "donutChartData": {"title": "Category Share", "colorCodes": ["#8884d8"], "data": [{"name": "No Data", "value": 1}]}
+            "lineChart": "false",
+            "lineChartData": {"title": "Trend", "data": []},
+            "barChart": "false",
+            "barChartData": {"title": "Category", "data": []},
+            "pieChart": "false",
+            "pieChartData": {"title": "Category Share", "colorCodes": [], "data": []},
+            "donutChart": "false",
+            "donutChartData": {"title": "Category Share", "colorCodes": [], "data": []}
         }
 @app.route('/ai/upload', methods=['POST'])
 def upload():
