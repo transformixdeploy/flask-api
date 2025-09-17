@@ -2197,6 +2197,9 @@ def generate_fallback_insights_full(df, schema_analysis):
 def build_dashboard_charts(df, schema_analysis):
     """Create line, bar, pie, and donut chart data with sensible defaults.
 
+    Ensures each chart uses a different column. If there are not enough distinct
+    columns to build all charts, some charts will be disabled ("false").
+
     Returns a dict with keys expected by the frontend: lineChart, lineChartData, barChart, barChartData,
     pieChart, pieChartData, donutChart, donutChartData. String booleans per spec.
     """
@@ -2255,63 +2258,148 @@ def build_dashboard_charts(df, schema_analysis):
             "#a4de6c", "#d0ed57", "#d88484", "#84d8c6", "#c6a4de"
         ]
 
-        # Build Bar/Pie/Donut from categorical frequencies
-        cat_col = pick_categorical(max_unique=15)
-        bar_pie_data = []
-        if cat_col is not None:
-            vc = working_df[cat_col].astype(str).str.strip()
-            vc = vc[vc != ""].value_counts().head(10)
-            bar_pie_data = [{"name": str(k), "value": int(v)} for k, v in vc.items()]
+        used_columns = set()
 
-        # Build Line from date grouping or numeric histogram
+        # Build Line from date grouping or numeric histogram (unique source)
+        line_enabled = False
+        line_title = "Trend"
         line_data = []
         date_col = pick_date_col()
         if date_col is not None:
-            parsed = pd.to_datetime(working_df[date_col], errors='coerce')
-            grp = parsed.dropna().dt.to_period('M').value_counts().sort_index()
-            # Use monthly counts; fallback to daily if few months
-            if len(grp) < 3:
-                grp = parsed.dropna().dt.date
-                grp = pd.Series(grp).value_counts().sort_index()
-            line_data = [{"name": str(idx), "value": int(val)} for idx, val in list(grp.items())[:20]]
-        elif numeric_cols:
-            # Histogram of first numeric column
-            col = numeric_cols[0]
-            series = working_df[col].dropna()
-            if not series.empty:
-                try:
-                    counts, bins = np.histogram(series, bins=10)
-                    for i in range(min(10, len(counts))):
-                        left = bins[i]
-                        right = bins[i+1]
-                        name = f"{round(float(left), 2)}–{round(float(right), 2)}"
-                        line_data.append({"name": name, "value": int(counts[i])})
-                except Exception:
-                    pass
+            try:
+                parsed = pd.to_datetime(working_df[date_col], errors='coerce')
+                grp = parsed.dropna().dt.to_period('M').value_counts().sort_index()
+                if len(grp) < 3:
+                    grp = parsed.dropna().dt.date
+                    grp = pd.Series(grp).value_counts().sort_index()
+                line_data = [{"name": str(idx), "value": int(val)} for idx, val in list(grp.items())[:20]]
+                if line_data:
+                    line_enabled = True
+                    line_title = date_col
+                    used_columns.add(date_col)
+            except Exception:
+                pass
+        if not line_enabled and numeric_cols:
+            # Histogram of first numeric column not used
+            hist_col = next((c for c in numeric_cols if c not in used_columns), None)
+            if hist_col is not None:
+                series = working_df[hist_col].dropna()
+                if not series.empty:
+                    try:
+                        counts, bins = np.histogram(series, bins=10)
+                        for i in range(min(10, len(counts))):
+                            left = bins[i]
+                            right = bins[i+1]
+                            name = f"{round(float(left), 2)}–{round(float(right), 2)}"
+                            line_data.append({"name": name, "value": int(counts[i])})
+                        if line_data:
+                            line_enabled = True
+                            line_title = hist_col
+                            used_columns.add(hist_col)
+                    except Exception:
+                        pass
 
-        # Assemble outputs with required string booleans
+        # Build distinct categorical charts (bar, pie, donut) using different columns
+        def build_cat_data(col_name):
+            vc = working_df[col_name].astype(str).str.strip()
+            vc = vc[vc != ""].value_counts().head(10)
+            return [{"name": str(k), "value": int(v)} for k, v in vc.items()]
+
+        # Gather up to 3 distinct categorical columns
+        categorical_choices = []
+        # Prefer reasonable cardinality first
+        for col in text_cols:
+            try:
+                uniq = working_df[col].nunique(dropna=True)
+            except Exception:
+                continue
+            if 2 <= uniq <= 15:
+                categorical_choices.append((col, uniq))
+        # If too few, add additional lowest-uniqueness columns (>1)
+        if len(categorical_choices) < 3:
+            extras = []
+            for col in text_cols:
+                if any(col == c for c, _ in categorical_choices):
+                    continue
+                try:
+                    uniq = working_df[col].nunique(dropna=True)
+                except Exception:
+                    continue
+                if uniq > 1:
+                    extras.append((col, uniq))
+            # Sort extras by uniqueness ascending
+            extras.sort(key=lambda x: x[1])
+            categorical_choices.extend(extras[: max(0, 3 - len(categorical_choices))])
+
+        # Filter out any already used columns
+        categorical_choices = [c for c in categorical_choices if c[0] not in used_columns]
+
+        # Assign unique columns to bar, pie, donut in order
+        bar_enabled = False
+        bar_title = "Category"
+        bar_data = []
+        if categorical_choices:
+            bar_col = categorical_choices.pop(0)[0]
+            try:
+                bar_data = build_cat_data(bar_col)
+                if bar_data:
+                    bar_enabled = True
+                    bar_title = bar_col
+                    used_columns.add(bar_col)
+            except Exception:
+                pass
+
+        pie_enabled = False
+        pie_title = "Category Share"
+        pie_data = []
+        if categorical_choices:
+            pie_col = categorical_choices.pop(0)[0]
+            try:
+                pie_data = build_cat_data(pie_col)
+                if pie_data:
+                    pie_enabled = True
+                    pie_title = pie_col
+                    used_columns.add(pie_col)
+            except Exception:
+                pass
+
+        donut_enabled = False
+        donut_title = "Category Share"
+        donut_data = []
+        if categorical_choices:
+            donut_col = categorical_choices.pop(0)[0]
+            try:
+                donut_data = build_cat_data(donut_col)
+                if donut_data:
+                    donut_enabled = True
+                    donut_title = donut_col
+                    used_columns.add(donut_col)
+            except Exception:
+                pass
+
+        # Assemble outputs with required string booleans, disable when not possible
         charts = {
-            "lineChart": "true",
+            "lineChart": "true" if line_enabled else "false",
             "lineChartData": {
-                "title": (cat_col or "Trend") if date_col else (numeric_cols[0] if numeric_cols else "Trend"),
+                "title": line_title,
                 "data": line_data if line_data else ([{"name": "No Data", "value": 0}])
             },
-            "barChart": "true",
+            "barChart": "true" if bar_enabled else "false",
             "barChartData": {
-                "title": cat_col or "Category",
-                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 0}])
+                "title": bar_title,
+                "data": bar_data if bar_data else ([{"name": "No Data", "value": 0}])
             },
-            "pieChart": "true",
+            "pieChart": "true" if pie_enabled else "false",
             "pieChartData": {
-                "title": cat_col or "Category Share",
-                "colorCodes": palette[:max(1, len(bar_pie_data))] if bar_pie_data else palette[:1],
-                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 1}])
+                "title": pie_title,
+                "colorCodes": palette[:max(1, len(pie_data))] if pie_data else palette[:1],
+                "data": pie_data if pie_data else ([{"name": "No Data", "value": 1}])
             },
-            "donutChart": "true",
+            "donutChart": "true" if donut_enabled else "false",
             "donutChartData": {
-                "title": cat_col or "Category Share",
-                "colorCodes": palette[:max(1, len(bar_pie_data))] if bar_pie_data else palette[:1],
-                "data": bar_pie_data if bar_pie_data else ([{"name": "No Data", "value": 1}])
+                "title": donut_title,
+                "colorCodes": palette[:max(1, len(donut_data))] if donut_data else palette[:1],
+                "data": donut_data if donut_data else ([{"name": "No Data", "value": 1}])
             }
         }
 
@@ -2471,10 +2559,14 @@ def smart_question_example():
                 "message": "No columns found in data"
             }), 400
 
-        schema_analyzer = DataSchemaAnalyzer(df)
+        # Use only meaningful columns (exclude IDs and similar) to avoid unhelpful questions
+        meaningful_cols = filter_meaningful_columns(df)
+        df_meaningful = df[meaningful_cols]
+
+        schema_analyzer = DataSchemaAnalyzer(df_meaningful)
         schema_analysis = schema_analyzer.analyze_schema()
 
-        smart_questions = generate_smart_questions(df, schema_analysis)
+        smart_questions = generate_smart_questions(df_meaningful, schema_analysis)
 
         return jsonify(smart_questions), 200
 
