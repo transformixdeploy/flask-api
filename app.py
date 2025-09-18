@@ -1428,7 +1428,7 @@ class SmartRAGAssistant:
             
             # Updated Claude API call
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",  # Use Claude Sonnet 3.5
+                model="claude-3-5-haiku-latest",  # Use Claude Sonnet 3.5
                 max_tokens=5000,
                 temperature=0.7,
                 system="You are a Smart Business Intelligence Assistant.",
@@ -1657,7 +1657,7 @@ def generate_dashboard_insights(df, schema_analysis):
         # Generate insights using Claude
         prompt = create_dashboard_prompt(data_context)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-3-5-haiku-latest",
             max_tokens=5000,
             temperature=0.7,
             system="You are a Business Intelligence Dashboard Generator.",
@@ -2971,3 +2971,4 @@ def pattern_analysis_analyze():
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5001, debug=True)
+
