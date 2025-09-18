@@ -1428,7 +1428,7 @@ class SmartRAGAssistant:
             
             # Updated Claude API call
             response = self.client.messages.create(
-                model="claude-3-5-haiku-latest",  # Use Claude Sonnet 3.5
+                model="claude-sonnet-4-20250514",  # Use Claude Sonnet 3.5
                 max_tokens=5000,
                 temperature=0.7,
                 system="You are a Smart Business Intelligence Assistant.",
@@ -1657,7 +1657,7 @@ def generate_dashboard_insights(df, schema_analysis):
         # Generate insights using Claude
         prompt = create_dashboard_prompt(data_context)
         response = client.messages.create(
-            model="claude-3-5-haiku-latest",
+            model="claude-sonnet-4-20250514",
             max_tokens=5000,
             temperature=0.7,
             system="You are a Business Intelligence Dashboard Generator.",
@@ -2195,13 +2195,13 @@ def generate_fallback_insights_full(df, schema_analysis):
     return base
 
 def build_dashboard_charts(df, schema_analysis):
-    """Create line, bar, pie, and donut chart data with sensible defaults.
+    """Create bar and pie chart data with sensible defaults.
 
-    Ensures each chart uses a different column. If there are not enough distinct
-    columns to build all charts, some charts will be disabled ("false").
+    Ensures bar and pie use different categorical columns. If there are not
+    enough distinct columns, charts will be disabled ("false").
 
-    Returns a dict with keys expected by the frontend: lineChart, lineChartData, barChart, barChartData,
-    pieChart, pieChartData, donutChart, donutChartData. String booleans per spec.
+    Returns a dict with keys expected by the frontend: barChart, barChartData,
+    pieChart, pieChartData. String booleans per spec.
     """
     try:
         # Use meaningful columns to avoid IDs and similar
@@ -2300,45 +2300,6 @@ def build_dashboard_charts(df, schema_analysis):
 
         used_columns = set()
 
-        # Build Line from date grouping or numeric histogram (unique source)
-        line_enabled = False
-        line_title = "Trend"
-        line_data = []
-        date_col = pick_date_col()
-        if date_col is not None:
-            try:
-                parsed = pd.to_datetime(working_df[date_col], errors='coerce')
-                grp = parsed.dropna().dt.to_period('M').value_counts().sort_index()
-                if len(grp) < 3:
-                    grp = parsed.dropna().dt.date
-                    grp = pd.Series(grp).value_counts().sort_index()
-                line_data = [{"name": str(idx), "value": int(val)} for idx, val in list(grp.items())[:20]]
-                if line_data:
-                    line_enabled = True
-                    line_title = date_col
-                    used_columns.add(date_col)
-            except Exception:
-                pass
-        if not line_enabled and numeric_cols:
-            # Histogram of first numeric column not used
-            hist_col = next((c for c in numeric_cols if c not in used_columns), None)
-            if hist_col is not None:
-                series = working_df[hist_col].dropna()
-                if not series.empty:
-                    try:
-                        counts, bins = np.histogram(series, bins=10)
-                        for i in range(min(10, len(counts))):
-                            left = bins[i]
-                            right = bins[i+1]
-                            name = f"{round(float(left), 2)}–{round(float(right), 2)}"
-                            line_data.append({"name": name, "value": int(counts[i])})
-                        if line_data:
-                            line_enabled = True
-                            line_title = hist_col
-                            used_columns.add(hist_col)
-                    except Exception:
-                        pass
-
         # Build distinct categorical charts (bar, pie, donut) using different columns
         def build_cat_data(col_name):
             series = working_df[col_name]
@@ -2350,7 +2311,7 @@ def build_dashboard_charts(df, schema_analysis):
             vc = series.value_counts().head(10)
             return [{"name": str(k), "value": int(v)} for k, v in vc.items()]
 
-        # Gather up to 3 distinct categorical columns
+        # Gather up to 2 distinct categorical columns
         categorical_choices = []
         # Prefer reasonable cardinality first from filtered set
         for col in filtered_text_cols:
@@ -2361,7 +2322,7 @@ def build_dashboard_charts(df, schema_analysis):
             if 2 <= uniq <= 15:
                 categorical_choices.append((col, uniq))
         # If too few, add additional lowest-uniqueness columns (>1)
-        if len(categorical_choices) < 3:
+        if len(categorical_choices) < 2:
             extras = []
             for col in filtered_text_cols:
                 if any(col == c for c, _ in categorical_choices):
@@ -2374,12 +2335,12 @@ def build_dashboard_charts(df, schema_analysis):
                     extras.append((col, uniq))
             # Sort extras by uniqueness ascending
             extras.sort(key=lambda x: x[1])
-            categorical_choices.extend(extras[: max(0, 3 - len(categorical_choices))])
+            categorical_choices.extend(extras[: max(0, 2 - len(categorical_choices))])
 
         # Filter out any already used columns
         categorical_choices = [c for c in categorical_choices if c[0] not in used_columns]
 
-        # Assign unique columns to bar, pie, donut in order
+        # Assign unique columns to bar and pie in order
         bar_enabled = False
         bar_title = "Category"
         bar_data = []
@@ -2408,27 +2369,8 @@ def build_dashboard_charts(df, schema_analysis):
             except Exception:
                 pass
 
-        donut_enabled = False
-        donut_title = "Category Share"
-        donut_data = []
-        if categorical_choices:
-            donut_col = categorical_choices.pop(0)[0]
-            try:
-                donut_data = build_cat_data(donut_col)
-                if donut_data:
-                    donut_enabled = True
-                    donut_title = donut_col
-                    used_columns.add(donut_col)
-            except Exception:
-                pass
-
         # Assemble outputs with required string booleans, disable when not possible
         charts = {
-            "lineChart": "true" if line_enabled else "false",
-            "lineChartData": {
-                "title": line_title,
-                "data": line_data if line_data else []
-            },
             "barChart": "true" if bar_enabled else "false",
             "barChartData": {
                 "title": bar_title,
@@ -2439,12 +2381,6 @@ def build_dashboard_charts(df, schema_analysis):
                 "title": pie_title,
                 "colorCodes": palette[:max(1, len(pie_data))] if pie_data else [],
                 "data": pie_data if pie_data else []
-            },
-            "donutChart": "true" if donut_enabled else "false",
-            "donutChartData": {
-                "title": donut_title,
-                "colorCodes": palette[:max(1, len(donut_data))] if donut_data else [],
-                "data": donut_data if donut_data else []
             }
         }
 
@@ -2452,14 +2388,10 @@ def build_dashboard_charts(df, schema_analysis):
     except Exception:
         # Robust fallback structure: disable charts when no valid data
         return {
-            "lineChart": "false",
-            "lineChartData": {"title": "Trend", "data": []},
             "barChart": "false",
             "barChartData": {"title": "Category", "data": []},
             "pieChart": "false",
-            "pieChartData": {"title": "Category Share", "colorCodes": [], "data": []},
-            "donutChart": "false",
-            "donutChartData": {"title": "Category Share", "colorCodes": [], "data": []}
+            "pieChartData": {"title": "Category Share", "colorCodes": [], "data": []}
         }
 @app.route('/ai/upload', methods=['POST'])
 def upload():
